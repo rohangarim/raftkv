@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package raftkv.proto;
+
+option optimize_for = SPEED;
+
+// Node-level administration and liveness. Deliberately NOT the data plane:
+// nothing here touches a Raft group or the state machine, so a health probe
+// can never be blocked behind consensus.
+service Admin {
+  // Liveness probe. Echoes the caller's nonce so a client can tell a real
+  // response apart from a cached or replayed one, and reports the server's
+  // identity and monotonic uptime.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {
+  // Opaque value echoed back verbatim.
+  uint64 nonce = 1;
+}
+
+message PingResponse {
+  uint64 nonce = 1;
+  // Stable identifier of the responding node, e.g. "node-3".
+  string node_id = 2;
+  // Nanoseconds since this process started serving. Monotonic; a decrease
+  // across two responses means the process restarted.
+  uint64 uptime_ns = 3;
+}
