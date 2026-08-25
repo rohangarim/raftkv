@@ -1,6 +1,37 @@
 include(FetchContent)
 
-set(FETCHCONTENT_QUIET OFF)
+# Shared source checkout, per-preset object files.
+#
+# Every preset has its own binaryDir, so the default FetchContent layout would
+# re-clone gRPC and all of its submodules (>1 GB) once per sanitizer preset.
+# We pin SOURCE_DIR and SUBBUILD_DIR outside the build tree so the download
+# happens exactly once, while BINARY_DIR stays inside the preset's build tree
+# because the sanitizer presets compile the dependencies with different flags
+# and must not share object files.
+set(RAFTKV_DEPS_SRC "${CMAKE_SOURCE_DIR}/.deps" CACHE PATH
+    "Shared source checkout for fetched dependencies")
+
+# Acquire the sources with our own script rather than FetchContent's git step.
+#
+# FetchContent's download is all-or-nothing: one dropped connection among
+# gRPC's submodules and it deletes the whole tree and restarts a multi-gigabyte
+# clone. scripts/fetch_deps.sh is shallow, per-submodule, retrying, and
+# resumable. FetchContent still owns the interesting part -- adding the sources
+# to our build and wiring up targets -- via FETCHCONTENT_SOURCE_DIR_*, which is
+# the documented way to point it at a tree you already have.
+option(RAFTKV_FETCH_DEPS "Run scripts/fetch_deps.sh at configure time" ON)
+if(RAFTKV_FETCH_DEPS AND NOT RAFTKV_USE_SYSTEM_GRPC)
+  message(STATUS "raftkv: fetching dependency sources into ${RAFTKV_DEPS_SRC}")
+  execute_process(
+    COMMAND "${CMAKE_SOURCE_DIR}/scripts/fetch_deps.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    RESULT_VARIABLE fetch_result)
+  if(NOT fetch_result EQUAL 0)
+    message(FATAL_ERROR
+      "raftkv: dependency fetch failed. Re-run `scripts/fetch_deps.sh` "
+      "directly; it resumes from what it already downloaded.")
+  endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # gRPC + Protobuf + Abseil
@@ -31,11 +62,19 @@ else()
   set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
   set(RE2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 
+  set(FETCHCONTENT_SOURCE_DIR_GRPC "${RAFTKV_DEPS_SRC}/grpc-src" CACHE PATH "" FORCE)
   FetchContent_Declare(grpc
     GIT_REPOSITORY https://github.com/grpc/grpc.git
     GIT_TAG        v1.75.1
     GIT_SHALLOW    TRUE
-    GIT_PROGRESS   TRUE
+    # Only the submodules a C++ build actually consumes. gRPC's default
+    # `--recursive` pulls ~1.3 GB including bloaty, benchmark, googletest and
+    # opentelemetry-cpp, none of which we compile -- and every extra clone is
+    # another chance for the network to drop the build on the floor.
+    GIT_SUBMODULES "third_party/abseil-cpp;third_party/boringssl-with-bazel;third_party/cares/cares;third_party/envoy-api;third_party/googleapis;third_party/opencensus-proto;third_party/protobuf;third_party/protoc-gen-validate;third_party/re2;third_party/xds;third_party/zlib"
+    SOURCE_DIR     "${RAFTKV_DEPS_SRC}/grpc-src"
+    SUBBUILD_DIR   "${RAFTKV_DEPS_SRC}/grpc-subbuild"
+    BINARY_DIR     "${CMAKE_BINARY_DIR}/_deps/grpc-build"
     SYSTEM)
   FetchContent_MakeAvailable(grpc)
 
@@ -47,11 +86,14 @@ endif()
 # GoogleTest
 # ---------------------------------------------------------------------------
 if(RAFTKV_BUILD_TESTS)
+  set(FETCHCONTENT_SOURCE_DIR_GOOGLETEST "${RAFTKV_DEPS_SRC}/googletest-src" CACHE PATH "" FORCE)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG        v1.17.0
     GIT_SHALLOW    TRUE
-    GIT_PROGRESS   TRUE
+    SOURCE_DIR     "${RAFTKV_DEPS_SRC}/googletest-src"
+    SUBBUILD_DIR   "${RAFTKV_DEPS_SRC}/googletest-subbuild"
+    BINARY_DIR     "${CMAKE_BINARY_DIR}/_deps/googletest-build"
     SYSTEM)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)

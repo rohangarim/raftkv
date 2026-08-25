@@ -6,3 +6,4 @@ _deps/
 *.o
 *.a
 .DS_Store
+.deps/
