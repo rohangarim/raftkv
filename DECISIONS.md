@@ -189,3 +189,71 @@ cannot afford a source of fake ones.
 
 **Cost:** Tests cannot assume a stable address, so fixtures have to thread the
 bound address through. Minor.
+
+---
+
+## D-0009: A hand-written fetch script owns the download; FetchContent owns the build
+
+**Phase:** 0. Supersedes the download half of D-0003; the pinning and the
+no-mixed-Protobuf rule stand.
+
+**What:** `scripts/fetch_deps.sh` clones gRPC and GoogleTest into `.deps/`
+shallowly, initializes gRPC's submodules one at a time with `--depth 1`, and
+retries each one individually up to five times. CMake runs it at configure time
+via `execute_process` and then points FetchContent at the result with
+`FETCHCONTENT_SOURCE_DIR_GRPC` / `_GOOGLETEST`. FetchContent still does
+`add_subdirectory` and target wiring.
+
+**Why:** Two separate problems, both observed rather than anticipated.
+
+First, FetchContent's git step is all-or-nothing. gRPC's `--recursive` clone
+pulls roughly 1.3 GB across a dozen submodules; when one connection was reset
+mid-transfer, CMake deleted the entire source tree and restarted from zero.
+This happened three times on this machine's link and never converged. The
+per-submodule retry turns a fatal restart into a few seconds of lost work,
+because everything already on disk is kept.
+
+Second, restricting the submodule set to the eleven that a C++ build actually
+compiles -- dropping `bloaty`, `benchmark`, `googletest`, and
+`opentelemetry-cpp`, which we never reference -- took `.deps/` from 2.8 GB to
+608 MB. Less to download is less to fail.
+
+Separately, `SOURCE_DIR` is shared across presets while `BINARY_DIR` stays
+inside each preset's build tree. Sources are identical for every preset;
+objects are not, because the sanitizer presets compile with different flags and
+sharing object files between them would be silently wrong.
+
+**Alternative:** Retry `cmake --preset` in a loop and hope. Or vendor the
+sources as a git submodule of this repo, which makes the clone the user's
+problem instead of the build's.
+
+**Cost:** A shell script is now load-bearing for the build, and the pinned
+versions live in two places (`scripts/fetch_deps.sh` and
+`cmake/Dependencies.cmake`) that can drift. The script is idempotent and
+verifies every submodule directory is non-empty before reporting success, so
+the failure mode is a loud error rather than a mysterious missing header.
+`-DRAFTKV_FETCH_DEPS=OFF` disables it for environments that manage `.deps/`
+themselves.
+
+---
+
+## D-0010: clang-tidy is given the macOS SDK path explicitly
+
+**Phase:** 0
+
+**What:** `scripts/tidy.sh` passes `--extra-arg=-isysroot $(xcrun
+--show-sdk-path)` on Darwin.
+
+**Why:** Homebrew LLVM's `clang-tidy` does not default to Apple's libc++
+headers, so `#include <atomic>` failed to resolve. The interesting part is what
+that produced: not one clear error, but a cascade of downstream nonsense,
+including `cppcoreguidelines-pro-type-member-init` claiming that constructors
+with complete member-initializer lists initialized nothing. Once the parse
+succeeded, those diagnostics vanished on their own.
+
+Worth remembering for later phases: when a static analyzer reports something
+structurally impossible, suspect its parse before suspecting the code.
+
+**Alternative:** Use Apple's bundled `clang-tidy`. It does not ship one.
+
+**Cost:** `scripts/tidy.sh` has a platform branch in it.

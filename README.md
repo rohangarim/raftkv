@@ -29,8 +29,14 @@ cmake --build --preset default
 ctest --preset default
 ```
 
-The first configure clones and builds gRPC, Protobuf, and Abseil from source
-(roughly 1.5 GB of sources; several minutes). Subsequent builds reuse it.
+The first configure runs `scripts/fetch_deps.sh`, which shallow-clones gRPC and
+GoogleTest into `.deps/` (about 600 MB), then builds gRPC, Protobuf, Abseil,
+BoringSSL, and re2 from source. That is minutes, not seconds. Subsequent builds
+reuse both.
+
+`.deps/` is shared across build presets; object files are not. If a clone is
+interrupted, re-run `scripts/fetch_deps.sh` directly — it resumes from what it
+already has rather than starting over.
 
 If you already have a matching gRPC install:
 
