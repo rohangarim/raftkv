@@ -22,5 +22,17 @@ if [ -z "${files}" ]; then
 fi
 count=$(echo "${files}" | wc -l | tr -d ' ')
 
-echo "${files}" | xargs clang-tidy -p build --quiet
+# Homebrew's clang-tidy does not know where Apple's libc++ headers live, so
+# every <atomic>/<chrono> include fails to resolve and the resulting parse
+# errors produce a flood of nonsense diagnostics. Hand it the SDK explicitly.
+EXTRA=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  SDK=$(xcrun --show-sdk-path 2>/dev/null || true)
+  if [ -n "${SDK}" ]; then
+    EXTRA="--extra-arg=-isysroot --extra-arg=${SDK}"
+  fi
+fi
+
+# shellcheck disable=SC2086
+echo "${files}" | xargs clang-tidy -p build --quiet ${EXTRA}
 echo "tidy: clean (${count} files)"

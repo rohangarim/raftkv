@@ -2,7 +2,7 @@
 function(raftkv_test name)
   cmake_parse_arguments(ARG "" "" "SOURCES;LIBS" ${ARGN})
   add_executable(${name} ${ARG_SOURCES})
-  target_link_libraries(${name} PRIVATE ${ARG_LIBS} GTest::gtest GTest::gtest_main raftkv_warnings)
+  target_link_libraries(${name} PRIVATE ${ARG_LIBS} GTest::gtest_main raftkv_warnings)
   gtest_discover_tests(${name}
     PROPERTIES TIMEOUT 120
     DISCOVERY_MODE PRE_TEST)

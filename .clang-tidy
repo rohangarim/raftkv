@@ -9,6 +9,7 @@ Checks: >
   concurrency-*,
   performance-*,
   -performance-avoid-endl,
+  -performance-enum-size,
   modernize-use-override,
   modernize-use-nullptr,
   modernize-use-using,
