@@ -2,14 +2,14 @@
 // server bound a real socket, and a real client got a real response back.
 // If this passes, the build system is not the thing that is broken.
 
-#include "transport/admin_service.h"
-
 #include <memory>
 
 #include <grpcpp/grpcpp.h>
 #include <gtest/gtest.h>
 
 #include "admin.grpc.pb.h"
+
+#include "transport/admin_service.h"
 
 namespace raftkv::transport {
 namespace {

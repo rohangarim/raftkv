@@ -43,12 +43,18 @@ inline bool LogEnabled(LogLevel level) {
 
 constexpr std::string_view LevelName(LogLevel level) {
   switch (level) {
-    case LogLevel::kTrace: return "TRACE";
-    case LogLevel::kDebug: return "DEBUG";
-    case LogLevel::kInfo:  return "INFO";
-    case LogLevel::kWarn:  return "WARN";
-    case LogLevel::kError: return "ERROR";
-    case LogLevel::kOff:   return "OFF";
+    case LogLevel::kTrace:
+      return "TRACE";
+    case LogLevel::kDebug:
+      return "DEBUG";
+    case LogLevel::kInfo:
+      return "INFO";
+    case LogLevel::kWarn:
+      return "WARN";
+    case LogLevel::kError:
+      return "ERROR";
+    case LogLevel::kOff:
+      return "OFF";
   }
   return "?";
 }
@@ -60,15 +66,15 @@ void LogAt(LogLevel level, const char* file, int line, const char* fmt, ...)
 
 }  // namespace raftkv
 
-#define RAFTKV_LOG(level, ...)                                                        \
-  do {                                                                                \
-    if (::raftkv::LogEnabled(level)) {                                                \
-      ::raftkv::LogAt((level), __FILE__, __LINE__, __VA_ARGS__);                       \
-    }                                                                                 \
+#define RAFTKV_LOG(level, ...)                                   \
+  do {                                                           \
+    if (::raftkv::LogEnabled(level)) {                           \
+      ::raftkv::LogAt((level), __FILE__, __LINE__, __VA_ARGS__); \
+    }                                                            \
   } while (0)
 
 #define LOG_TRACE(...) RAFTKV_LOG(::raftkv::LogLevel::kTrace, __VA_ARGS__)
 #define LOG_DEBUG(...) RAFTKV_LOG(::raftkv::LogLevel::kDebug, __VA_ARGS__)
-#define LOG_INFO(...)  RAFTKV_LOG(::raftkv::LogLevel::kInfo, __VA_ARGS__)
-#define LOG_WARN(...)  RAFTKV_LOG(::raftkv::LogLevel::kWarn, __VA_ARGS__)
+#define LOG_INFO(...) RAFTKV_LOG(::raftkv::LogLevel::kInfo, __VA_ARGS__)
+#define LOG_WARN(...) RAFTKV_LOG(::raftkv::LogLevel::kWarn, __VA_ARGS__)
 #define LOG_ERROR(...) RAFTKV_LOG(::raftkv::LogLevel::kError, __VA_ARGS__)

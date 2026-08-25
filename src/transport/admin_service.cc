@@ -49,9 +49,7 @@ std::unique_ptr<NodeServer> NodeServer::Start(const std::string& address, std::s
 
 NodeServer::~NodeServer() { Shutdown(); }
 
-std::string NodeServer::ClientAddress() const {
-  return "127.0.0.1:" + std::to_string(bound_port_);
-}
+std::string NodeServer::ClientAddress() const { return "127.0.0.1:" + std::to_string(bound_port_); }
 
 void NodeServer::Shutdown() {
   if (server_ != nullptr) {
@@ -62,8 +60,7 @@ void NodeServer::Shutdown() {
 }
 
 std::unique_ptr<proto::Admin::Stub> MakeAdminStub(const std::string& address) {
-  return proto::Admin::NewStub(
-      grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
+  return proto::Admin::NewStub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
 }
 
 }  // namespace raftkv::transport
