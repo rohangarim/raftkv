@@ -25,7 +25,17 @@ fi
 
 # Sanitizer runtime options. halt_on_error keeps a green run honest: a report
 # that does not fail the build is a report nobody reads.
-export ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1"
+#
+# LeakSanitizer does not exist on macOS/arm64, and asking for it is fatal
+# rather than ignored: protoc is itself built with the sanitizer and runs
+# during the build, so `detect_leaks=1` aborts code generation and the build
+# fails long before any test runs. Enable leak detection only where it exists.
+if [ "$(uname -s)" = "Linux" ]; then
+  RAFTKV_LEAKS="detect_leaks=1"
+else
+  RAFTKV_LEAKS="detect_leaks=0"
+fi
+export ASAN_OPTIONS="${RAFTKV_LEAKS}:halt_on_error=1:abort_on_error=1:strict_string_checks=1"
 export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1:abort_on_error=1"
 export TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1"
 

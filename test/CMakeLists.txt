@@ -5,7 +5,11 @@ function(raftkv_test name)
   target_link_libraries(${name} PRIVATE ${ARG_LIBS} GTest::gtest_main raftkv_warnings)
   gtest_discover_tests(${name}
     PROPERTIES TIMEOUT 120
-    DISCOVERY_MODE PRE_TEST)
+    DISCOVERY_MODE PRE_TEST
+    # Default discovery timeout is 5s. Sanitized binaries start slower and a
+    # loaded machine makes that worse; a discovery timeout aborts the whole
+    # ctest run and looks nothing like the flake it is.
+    DISCOVERY_TIMEOUT 120)
 endfunction()
 
 raftkv_test(log_test

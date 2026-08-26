@@ -257,3 +257,59 @@ structurally impossible, suspect its parse before suspecting the code.
 **Alternative:** Use Apple's bundled `clang-tidy`. It does not ship one.
 
 **Cost:** `scripts/tidy.sh` has a platform branch in it.
+
+---
+
+## D-0011: Leak detection is enabled on Linux only
+
+**Phase:** 0
+
+**What:** `scripts/ci.sh` sets `detect_leaks=1` on Linux and `detect_leaks=0`
+elsewhere.
+
+**Why:** LeakSanitizer does not exist on macOS/arm64, and requesting it is
+fatal rather than ignored: `AddressSanitizer: detect_leaks is not supported on
+this platform` followed by `abort()`. The failure landed somewhere unexpected.
+The ASan preset compiles `protoc` with ASan, and `protoc` *runs during the
+build* to generate our `.pb.cc` files. So the sanitizer runtime aborted code
+generation, and the ASan build died at step 2149 of 3142 with a message about
+leak detection — nowhere near a test.
+
+Two things worth carrying forward. First, when a preset builds its own
+toolchain, sanitizer *runtime* options apply at build time, not just at test
+time. Second, this is the first concrete instance of the macOS/Linux split from
+D-0002: leak detection genuinely only runs in CI, so the local ASan run is
+weaker than the CI one and we should not claim otherwise.
+
+**Alternative:** Skip the ASan preset on macOS entirely. Rejected: ASan's
+use-after-free and buffer-overflow checks are the ones that matter for the log
+and WAL code, and those work fine here. Only the leak half is missing.
+
+**Cost:** Leaks are caught in CI, not locally. A leak introduced on this Mac
+survives until a Linux run notices it.
+
+---
+
+## D-0012: gtest discovery timeout raised to 120s
+
+**Phase:** 0
+
+**What:** `gtest_discover_tests(... DISCOVERY_TIMEOUT 120)`.
+
+**Why:** A UBSan `ctest` run failed with "Process terminated due to timeout"
+during test discovery. Measured directly afterwards, `--gtest_list_tests` on
+that same binary takes 0.09 s, so this was a transient under load against
+CMake's 5-second default, not a slow binary.
+
+That distinction is the point. A discovery timeout aborts the entire `ctest`
+run and reports as a hard failure, which in a project whose later phases are
+full of real timing-dependent failures is exactly the wrong signal to have
+firing at random. Later phases will have flaky-looking failures that are
+genuine consensus bugs; the build system must not add fake ones to the pile.
+
+**Alternative:** `DISCOVERY_MODE POST_BUILD`, which discovers at build time
+instead. It makes the build slower and does not remove the timeout, just moves
+it.
+
+**Cost:** A genuinely hung test binary now takes two minutes to report instead
+of five seconds.
