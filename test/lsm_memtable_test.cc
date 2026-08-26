@@ -1,9 +1,8 @@
-#include "lsm/memtable.h"
-
 #include <string>
 
 #include <gtest/gtest.h>
 
+#include "lsm/memtable.h"
 #include "lsm/write_batch.h"
 
 namespace raftkv::lsm {
@@ -162,7 +161,7 @@ TEST(WriteBatchTest, AssignsConsecutiveSequenceNumbers) {
   b.SetSequence(100);
 
   RecordingHandler h;
-  ASSERT_TRUE(b.Iterate(&h).ok());
+  ASSERT_TRUE(b.Iterate(&h).IsOk());
   ASSERT_EQ(h.entries.size(), 3U);
   EXPECT_EQ(h.entries[0].seq, 100U);
   EXPECT_EQ(h.entries[1].seq, 101U);
@@ -179,12 +178,12 @@ TEST(WriteBatchTest, SurvivesSerializationRoundTrip) {
   b.SetSequence(7);
 
   WriteBatch restored;
-  ASSERT_TRUE(WriteBatch::FromContents(b.Contents(), &restored).ok());
+  ASSERT_TRUE(WriteBatch::FromContents(b.Contents(), &restored).IsOk());
   EXPECT_EQ(restored.Count(), 2U);
   EXPECT_EQ(restored.Sequence(), 7U);
 
   RecordingHandler h;
-  ASSERT_TRUE(restored.Iterate(&h).ok());
+  ASSERT_TRUE(restored.Iterate(&h).IsOk());
   ASSERT_EQ(h.entries.size(), 2U);
   EXPECT_EQ(h.entries[0].value, std::string("v\0v", 3));
   EXPECT_EQ(h.entries[1].type, ValueType::kDeletion);
@@ -201,7 +200,7 @@ TEST(WriteBatchTest, ClearResetsCountAndContents) {
 // Deserialization must reject damage rather than surface it mid-recovery.
 TEST(WriteBatchTest, RejectsATruncatedHeader) {
   WriteBatch out;
-  EXPECT_EQ(WriteBatch::FromContents("short", &out).code(), Code::kCorruption);
+  EXPECT_EQ(WriteBatch::FromContents("short", &out).ErrCode(), Code::kCorruption);
 }
 
 TEST(WriteBatchTest, RejectsATruncatedRecord) {
@@ -211,7 +210,7 @@ TEST(WriteBatchTest, RejectsATruncatedRecord) {
   bytes.resize(bytes.size() - 2);
 
   WriteBatch out;
-  EXPECT_EQ(WriteBatch::FromContents(bytes, &out).code(), Code::kCorruption);
+  EXPECT_EQ(WriteBatch::FromContents(bytes, &out).ErrCode(), Code::kCorruption);
 }
 
 TEST(WriteBatchTest, RejectsACountThatDoesNotMatchTheRecords) {
@@ -221,7 +220,7 @@ TEST(WriteBatchTest, RejectsACountThatDoesNotMatchTheRecords) {
   bytes[8] = static_cast<char>(9);  // claim nine records
 
   WriteBatch out;
-  EXPECT_EQ(WriteBatch::FromContents(bytes, &out).code(), Code::kCorruption);
+  EXPECT_EQ(WriteBatch::FromContents(bytes, &out).ErrCode(), Code::kCorruption);
 }
 
 TEST(WriteBatchTest, RejectsAnUnknownRecordType) {
@@ -231,7 +230,7 @@ TEST(WriteBatchTest, RejectsAnUnknownRecordType) {
   bytes[12] = static_cast<char>(0x7E);  // type byte
 
   WriteBatch out;
-  EXPECT_EQ(WriteBatch::FromContents(bytes, &out).code(), Code::kCorruption);
+  EXPECT_EQ(WriteBatch::FromContents(bytes, &out).ErrCode(), Code::kCorruption);
 }
 
 }  // namespace

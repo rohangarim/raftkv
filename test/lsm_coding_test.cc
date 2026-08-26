@@ -38,8 +38,8 @@ TEST(CodingTest, Fixed32IsLittleEndianOnTheWire) {
 }
 
 TEST(CodingTest, VarintRoundTrips) {
-  const uint64_t values[] = {0, 1, 127, 128, 300, 1ULL << 20, 1ULL << 62,
-                             std::numeric_limits<uint64_t>::max()};
+  const uint64_t values[] = {0,   1,          127,        128,
+                             300, 1ULL << 20, 1ULL << 62, std::numeric_limits<uint64_t>::max()};
   std::string s;
   for (uint64_t v : values) {
     PutVarint64(&s, v);

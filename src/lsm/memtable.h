@@ -49,7 +49,7 @@ class MemTable {
   size_t Count() const { return table_.size(); }
 
   using Table = std::map<std::string, std::string, InternalKeyComparator>;
-  const Table& entries() const { return table_; }
+  const Table& Entries() const { return table_; }
 
  private:
   Table table_;

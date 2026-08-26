@@ -34,9 +34,9 @@ class [[nodiscard]] Status {
     return Status(Code::kNotSupported, std::move(msg));
   }
 
-  bool ok() const { return code_ == Code::kOk; }
-  Code code() const { return code_; }
-  const std::string& message() const { return message_; }
+  bool IsOk() const { return code_ == Code::kOk; }
+  Code ErrCode() const { return code_; }
+  const std::string& Message() const { return message_; }
 
   std::string ToString() const;
 
@@ -53,30 +53,30 @@ class [[nodiscard]] Status {
 template <typename T>
 class [[nodiscard]] Result {
  public:
-  Result(T value) : value_(std::move(value)) {}  // NOLINT(google-explicit-constructor)
+  Result(T value) : value_(std::move(value)) {}        // NOLINT(google-explicit-constructor)
   Result(Status status) : value_(std::move(status)) {  // NOLINT(google-explicit-constructor)
   }
 
-  bool ok() const { return std::holds_alternative<T>(value_); }
-  explicit operator bool() const { return ok(); }
+  bool IsOk() const { return std::holds_alternative<T>(value_); }
+  explicit operator bool() const { return IsOk(); }
 
   T& operator*() { return std::get<T>(value_); }
   const T& operator*() const { return std::get<T>(value_); }
   T* operator->() { return &std::get<T>(value_); }
 
   T&& TakeValue() { return std::move(std::get<T>(value_)); }
-  const Status& status() const { return std::get<Status>(value_); }
+  const Status& GetStatus() const { return std::get<Status>(value_); }
 
  private:
   std::variant<T, Status> value_;
 };
 
-#define RAFTKV_RETURN_IF_ERROR(expr)          \
-  do {                                        \
-    ::raftkv::lsm::Status s_ = (expr);        \
-    if (!s_.ok()) {                           \
-      return s_;                              \
-    }                                         \
+#define RAFTKV_RETURN_IF_ERROR(expr)   \
+  do {                                 \
+    ::raftkv::lsm::Status s_ = (expr); \
+    if (!s_.IsOk()) {                  \
+      return s_;                       \
+    }                                  \
   } while (0)
 
 }  // namespace raftkv::lsm

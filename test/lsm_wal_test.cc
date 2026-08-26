@@ -4,23 +4,29 @@
 // cleanly is easy; a WAL that behaves correctly after the process died
 // halfway through an append is the entire reason the file has CRCs in it.
 
-#include "lsm/wal.h"
-
 #include <fstream>
 #include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "lsm/wal.h"
+
 namespace raftkv::lsm {
 namespace {
+
+// Distinguishes temp directories between tests in the same binary. Tests may
+// run in parallel under ctest, so the pid alone is not enough.
+int NextTempId() {
+  static int counter = 0;
+  return counter++;
+}
 
 class WalTest : public ::testing::Test {
  protected:
   void SetUp() override {
     dir_ = std::filesystem::temp_directory_path() /
-           ("raftkv_wal_test_" + std::to_string(::getpid()) + "_" +
-            std::to_string(counter_++));
+           ("raftkv_wal_test_" + std::to_string(::getpid()) + "_" + std::to_string(NextTempId()));
     std::filesystem::create_directories(dir_);
     path_ = dir_ / "wal.log";
   }
@@ -32,15 +38,15 @@ class WalTest : public ::testing::Test {
 
   void WriteRecords(const std::vector<std::string>& records, bool sync = true) {
     auto opened = WalWriter::Open(path_);
-    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+    ASSERT_TRUE(opened.IsOk()) << opened.GetStatus().ToString();
     auto writer = opened.TakeValue();
     for (const auto& r : records) {
-      ASSERT_TRUE(writer->Append(r).ok());
+      ASSERT_TRUE(writer->Append(r).IsOk());
     }
     if (sync) {
-      ASSERT_TRUE(writer->Sync().ok());
+      ASSERT_TRUE(writer->Sync().IsOk());
     }
-    ASSERT_TRUE(writer->Close().ok());
+    ASSERT_TRUE(writer->Close().IsOk());
   }
 
   size_t FileSize() const { return std::filesystem::file_size(path_); }
@@ -63,7 +69,6 @@ class WalTest : public ::testing::Test {
 
   std::filesystem::path dir_;
   std::filesystem::path path_;
-  static inline int counter_ = 0;
 };
 
 TEST_F(WalTest, RoundTripsRecords) {
@@ -72,14 +77,14 @@ TEST_F(WalTest, RoundTripsRecords) {
   WriteRecords(records);
 
   std::vector<std::string> replayed;
-  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/false, &replayed).ok());
+  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/false, &replayed).IsOk());
   EXPECT_EQ(replayed, records);
 }
 
 TEST_F(WalTest, ReplayingAMissingFileIsNotAnError) {
   std::vector<std::string> replayed;
   const Status s = ReplayWal(dir_ / "does_not_exist.log", false, &replayed);
-  EXPECT_TRUE(s.ok()) << s.ToString();
+  EXPECT_TRUE(s.IsOk()) << s.ToString();
   EXPECT_TRUE(replayed.empty());
 }
 
@@ -89,7 +94,7 @@ TEST_F(WalTest, RecoversRecordsBeforeATornTail) {
   TruncateBy(3);
 
   std::vector<std::string> replayed;
-  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/true, &replayed).ok());
+  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/true, &replayed).IsOk());
   EXPECT_EQ(replayed, (std::vector<std::string>{"first", "second"}));
 }
 
@@ -98,20 +103,20 @@ TEST_F(WalTest, TruncationMakesTheFileAppendableAgain) {
   TruncateBy(3);
 
   std::vector<std::string> replayed;
-  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/true, &replayed).ok());
+  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/true, &replayed).IsOk());
   ASSERT_EQ(replayed.size(), 2U);
 
   // After truncation the file must end on a record boundary, so new appends
   // land cleanly rather than after a hole.
   auto opened = WalWriter::Open(path_);
-  ASSERT_TRUE(opened.ok());
+  ASSERT_TRUE(opened.IsOk());
   auto writer = opened.TakeValue();
-  ASSERT_TRUE(writer->Append("fourth").ok());
-  ASSERT_TRUE(writer->Sync().ok());
-  ASSERT_TRUE(writer->Close().ok());
+  ASSERT_TRUE(writer->Append("fourth").IsOk());
+  ASSERT_TRUE(writer->Sync().IsOk());
+  ASSERT_TRUE(writer->Close().IsOk());
 
   std::vector<std::string> after;
-  ASSERT_TRUE(ReplayWal(path_, false, &after).ok());
+  ASSERT_TRUE(ReplayWal(path_, false, &after).IsOk());
   EXPECT_EQ(after, (std::vector<std::string>{"first", "second", "fourth"}));
 }
 
@@ -121,7 +126,7 @@ TEST_F(WalTest, DetectsAFlippedBitInThePayload) {
 
   std::vector<std::string> replayed;
   const Status s = ReplayWal(path_, /*truncate_partial=*/false, &replayed);
-  EXPECT_EQ(s.code(), Code::kCorruption) << s.ToString();
+  EXPECT_EQ(s.ErrCode(), Code::kCorruption) << s.ToString();
   EXPECT_EQ(replayed, (std::vector<std::string>{"first"}))
       << "records before the damage must still be recovered";
 }
@@ -135,7 +140,7 @@ TEST_F(WalTest, DetectsACorruptedLengthField) {
 
   std::vector<std::string> replayed;
   const Status s = ReplayWal(path_, false, &replayed);
-  EXPECT_EQ(s.code(), Code::kCorruption) << s.ToString();
+  EXPECT_EQ(s.ErrCode(), Code::kCorruption) << s.ToString();
   EXPECT_TRUE(replayed.empty());
 }
 
@@ -144,7 +149,7 @@ TEST_F(WalTest, DetectsAFlippedBitInTheStoredCrc) {
   CorruptByteAt(0);
 
   std::vector<std::string> replayed;
-  EXPECT_EQ(ReplayWal(path_, false, &replayed).code(), Code::kCorruption);
+  EXPECT_EQ(ReplayWal(path_, false, &replayed).ErrCode(), Code::kCorruption);
 }
 
 TEST_F(WalTest, HandlesAZeroLengthTail) {
@@ -155,7 +160,7 @@ TEST_F(WalTest, HandlesAZeroLengthTail) {
   std::filesystem::resize_file(path_, size + 3);  // 3 stray bytes
 
   std::vector<std::string> replayed;
-  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/true, &replayed).ok());
+  ASSERT_TRUE(ReplayWal(path_, /*truncate_partial=*/true, &replayed).IsOk());
   EXPECT_EQ(replayed, (std::vector<std::string>{"first"}));
   EXPECT_EQ(FileSize(), size) << "stray tail bytes must be trimmed";
 }
@@ -169,7 +174,7 @@ TEST_F(WalTest, HandlesManyRecordsAcrossTheInternalBuffer) {
   WriteRecords(records);
 
   std::vector<std::string> replayed;
-  ASSERT_TRUE(ReplayWal(path_, false, &replayed).ok());
+  ASSERT_TRUE(ReplayWal(path_, false, &replayed).IsOk());
   EXPECT_EQ(replayed, records);
 }
 

@@ -44,9 +44,7 @@ constexpr uint64_t PackSequenceAndType(SequenceNumber seq, ValueType type) {
 
 constexpr SequenceNumber SequenceOf(uint64_t packed) { return packed >> 8; }
 
-constexpr ValueType TypeOf(uint64_t packed) {
-  return static_cast<ValueType>(packed & 0xFFU);
-}
+constexpr ValueType TypeOf(uint64_t packed) { return static_cast<ValueType>(packed & 0xFFU); }
 
 // Builds the internal key for a user key at a given sequence.
 inline std::string MakeInternalKey(std::string_view user_key, SequenceNumber seq, ValueType type) {
@@ -57,9 +55,7 @@ inline std::string MakeInternalKey(std::string_view user_key, SequenceNumber seq
   return out;
 }
 
-inline bool IsValidInternalKey(std::string_view internal_key) {
-  return internal_key.size() >= 8;
-}
+inline bool IsValidInternalKey(std::string_view internal_key) { return internal_key.size() >= 8; }
 
 inline std::string_view UserKeyOf(std::string_view internal_key) {
   return internal_key.substr(0, internal_key.size() - 8);
