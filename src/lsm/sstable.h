@@ -9,13 +9,20 @@
 //   index   repeated { varint klen | internal_key | varint offset }
 //           one entry per kIndexInterval data records; `offset` is the file
 //           offset of that data record
-//   footer  fixed64 index_offset | fixed64 index_size | fixed32 crc | fixed32 magic
+//   footer  fixed64 index_offset | fixed64 index_size | fixed64 max_sequence
+//           | fixed32 crc | fixed32 magic
 //
 // The footer is fixed width and lives at the end, so opening a table is one
-// small read at a known position rather than a scan. Its CRC covers the two
+// small read at a known position rather than a scan. Its CRC covers the
 // offsets: a corrupted index_offset would otherwise send the reader off to
 // parse garbage as an index, and the failure would surface as nonsense keys
 // rather than as corruption.
+//
+// max_sequence is what lets recovery resume numbering. Once a memtable is
+// flushed its WAL is deleted, so the WAL alone cannot tell a reopened database
+// how far sequence numbers had advanced. Recovering a sequence lower than the
+// data on disk makes every flushed record invisible -- reads run at a snapshot
+// that predates them -- and the database silently appears empty.
 //
 // The index is sparse. A dense index would be as large as the key set and
 // would have to be paged; a sparse one costs a short forward scan per lookup
@@ -45,7 +52,7 @@ namespace raftkv::lsm {
 inline constexpr size_t kIndexInterval = 16;
 
 inline constexpr uint32_t kSsTableMagic = 0x524B5654U;  // "RKVT"
-inline constexpr size_t kFooterSize = 24;
+inline constexpr size_t kFooterSize = 32;
 
 class SsTableBuilder {
  public:
@@ -66,6 +73,7 @@ class SsTableBuilder {
 
   uint64_t NumEntries() const { return num_entries_; }
   uint64_t FileSize() const { return file_size_; }
+  SequenceNumber MaxSequence() const { return max_sequence_; }
 
  private:
   SsTableBuilder(std::unique_ptr<WritableFile> file, std::filesystem::path path);
@@ -76,6 +84,7 @@ class SsTableBuilder {
   std::vector<std::pair<std::string, uint64_t>> index_;
   uint64_t num_entries_ = 0;
   uint64_t file_size_ = 0;
+  SequenceNumber max_sequence_ = 0;
   bool finished_ = false;
 };
 
@@ -106,10 +115,13 @@ class SsTable {
   const std::filesystem::path& Path() const { return file_->Path(); }
   uint64_t FileSize() const { return file_->Size(); }
   uint64_t NumIndexEntries() const { return index_.size(); }
+  // Highest sequence number stored in this table.
+  SequenceNumber MaxSequence() const { return max_sequence_; }
 
  private:
   SsTable(std::unique_ptr<RandomAccessFile> file,
-          std::vector<std::pair<std::string, uint64_t>> index, uint64_t data_end);
+          std::vector<std::pair<std::string, uint64_t>> index, uint64_t data_end,
+          SequenceNumber max_sequence);
 
   // File offset to begin scanning from for `probe`, using the sparse index.
   uint64_t SeekAnchor(std::string_view probe) const;
@@ -117,6 +129,7 @@ class SsTable {
   std::unique_ptr<RandomAccessFile> file_;
   std::vector<std::pair<std::string, uint64_t>> index_;
   uint64_t data_end_ = 0;
+  SequenceNumber max_sequence_ = 0;
 };
 
 }  // namespace raftkv::lsm

@@ -134,6 +134,7 @@ Status SsTableBuilder::Add(std::string_view internal_key, std::string_view value
   RAFTKV_RETURN_IF_ERROR(file_->Append(record));
 
   last_key_.assign(internal_key);
+  max_sequence_ = std::max(max_sequence_, SequenceOf(PackedOf(internal_key)));
   ++num_entries_;
   return Status::Ok();
 }
@@ -156,6 +157,7 @@ Status SsTableBuilder::Finish() {
   std::string footer;
   PutFixed64(&footer, index_offset);
   PutFixed64(&footer, index_bytes.size());
+  PutFixed64(&footer, max_sequence_);
   PutFixed32(&footer, Crc32c(footer.data(), footer.size()));
   PutFixed32(&footer, kSsTableMagic);
   RAFTKV_RETURN_IF_ERROR(file_->Append(footer));
@@ -172,8 +174,12 @@ Status SsTableBuilder::Finish() {
 // ---------------------------------------------------------------------------
 
 SsTable::SsTable(std::unique_ptr<RandomAccessFile> file,
-                 std::vector<std::pair<std::string, uint64_t>> index, uint64_t data_end)
-    : file_(std::move(file)), index_(std::move(index)), data_end_(data_end) {}
+                 std::vector<std::pair<std::string, uint64_t>> index, uint64_t data_end,
+                 SequenceNumber max_sequence)
+    : file_(std::move(file)),
+      index_(std::move(index)),
+      data_end_(data_end),
+      max_sequence_(max_sequence) {}
 
 Result<std::shared_ptr<SsTable>> SsTable::Open(const std::filesystem::path& path) {
   auto opened = RandomAccessFile::Open(path);
@@ -189,17 +195,18 @@ Result<std::shared_ptr<SsTable>> SsTable::Open(const std::filesystem::path& path
   std::string footer;
   RAFTKV_RETURN_IF_ERROR(file->ReadExactly(file->Size() - kFooterSize, kFooterSize, &footer));
 
-  const uint32_t magic = DecodeFixed32(footer.data() + 20);
+  const uint32_t magic = DecodeFixed32(footer.data() + 28);
   if (magic != kSsTableMagic) {
     return Status::Corruption("sstable bad magic: " + path.string());
   }
-  const uint32_t stored_crc = DecodeFixed32(footer.data() + 16);
-  if (Crc32c(footer.data(), 16) != stored_crc) {
+  const uint32_t stored_crc = DecodeFixed32(footer.data() + 24);
+  if (Crc32c(footer.data(), 24) != stored_crc) {
     return Status::Corruption("sstable footer CRC mismatch: " + path.string());
   }
 
   const uint64_t index_offset = DecodeFixed64(footer.data());
   const uint64_t index_size = DecodeFixed64(footer.data() + 8);
+  const SequenceNumber max_sequence = DecodeFixed64(footer.data() + 16);
   if (index_offset > file->Size() || index_size > file->Size() ||
       index_offset + index_size != file->Size() - kFooterSize) {
     return Status::Corruption("sstable index bounds inconsistent: " + path.string());
@@ -224,7 +231,8 @@ Result<std::shared_ptr<SsTable>> SsTable::Open(const std::filesystem::path& path
     index.emplace_back(std::string(key), offset);
   }
 
-  std::shared_ptr<SsTable> table(new SsTable(std::move(file), std::move(index), index_offset));
+  std::shared_ptr<SsTable> table(
+      new SsTable(std::move(file), std::move(index), index_offset, max_sequence));
   return table;
 }
 
