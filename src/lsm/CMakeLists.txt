@@ -1,6 +1,8 @@
 add_library(raftkv_lsm STATIC
   crc32c.cc
+  file.cc
   memtable.cc
+  sstable.cc
   status.cc
   wal.cc
   write_batch.cc)
