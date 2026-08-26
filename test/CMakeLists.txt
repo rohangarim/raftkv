@@ -31,3 +31,7 @@ raftkv_test(lsm_wal_test
 raftkv_test(lsm_memtable_test
   SOURCES lsm_memtable_test.cc
   LIBS raftkv_lsm)
+
+raftkv_test(lsm_sstable_test
+  SOURCES lsm_sstable_test.cc
+  LIBS raftkv_lsm)
