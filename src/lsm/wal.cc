@@ -1,11 +1,12 @@
 #include "lsm/wal.h"
 
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <cerrno>
 #include <cstring>
+#include <type_traits>
 #include <utility>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "lsm/coding.h"
 #include "lsm/crc32c.h"
@@ -13,15 +14,45 @@
 namespace raftkv::lsm {
 namespace {
 
-constexpr size_t kHeaderSize = 8;          // crc32 + length
-constexpr size_t kBufferTarget = 64 * 1024;
+constexpr size_t kHeaderSize = 8;  // crc32 + length
+constexpr size_t kBufferTarget = size_t{64} * 1024;
+
+// strerror() is not thread safe: it may return a pointer to a shared static
+// buffer that another thread is concurrently overwriting. In a system whose
+// whole point is concurrent replication, a mangled error message is the least
+// of it -- this is a genuine data race.
+//
+// strerror_r is the thread-safe replacement, but it has two incompatible
+// signatures in the wild: the XSI version (macOS, musl) returns int and fills
+// the caller's buffer, while glibc's GNU version returns char* that may or may
+// not point into that buffer. Dispatching on the return type handles both
+// without preprocessor guesswork about which libc this is.
+// The branch must depend on a template parameter: `if constexpr` still
+// type-checks a discarded branch when its condition is not type-dependent,
+// so a plain function body would fail to compile on whichever libc it is not
+// being built against.
+template <typename R>
+std::string StrerrorResult(R result, const char* buf, int err) {
+  if constexpr (std::is_same_v<R, char*>) {
+    return result != nullptr ? std::string(result) : std::string("unknown error");
+  } else {
+    // XSI: non-zero means the message did not fit, or errno was unrecognized.
+    return result == 0 ? std::string(buf) : ("errno " + std::to_string(err));
+  }
+}
+
+std::string SafeStrerror(int err) {
+  char buf[256];
+  buf[0] = '\0';
+  return StrerrorResult(::strerror_r(err, buf, sizeof(buf)), buf, err);
+}
 
 std::string ErrnoMessage(std::string_view what, const std::filesystem::path& path) {
   std::string msg(what);
   msg += " ";
   msg += path.string();
   msg += ": ";
-  msg += std::strerror(errno);
+  msg += SafeStrerror(errno);
   return msg;
 }
 
@@ -204,19 +235,19 @@ Status ReplayWal(const std::filesystem::path& path, bool truncate_partial,
   }
 
   auto opened = WalReader::Open(path);
-  if (!opened.ok()) {
-    return opened.status();
+  if (!opened.IsOk()) {
+    return opened.GetStatus();
   }
   std::unique_ptr<WalReader> reader = opened.TakeValue();
 
   while (true) {
     std::string record;
-    const Status s = reader->ReadRecord(&record);
-    if (s.ok()) {
+    Status s = reader->ReadRecord(&record);
+    if (s.IsOk()) {
       records->push_back(std::move(record));
       continue;
     }
-    if (s.code() == Code::kNotFound) {
+    if (s.ErrCode() == Code::kNotFound) {
       return Status::Ok();  // clean EOF
     }
 
