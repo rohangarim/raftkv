@@ -1,0 +1,22 @@
+---
+# Inherits the root configuration; the entries below are test-only relaxations.
+InheritParentConfig: true
+
+Checks: >
+  -bugprone-unchecked-optional-access
+
+# Why bugprone-unchecked-optional-access is off here, and only here:
+#
+# GoogleTest's ASSERT_* macros expand to a bare `return` on failure. That is
+# real control flow, but clang-tidy's dataflow analysis does not model it, so
+#
+#     ASSERT_TRUE(maybe.has_value());
+#     EXPECT_EQ(*maybe, expected);
+#
+# is reported as an unchecked access even though the dereference is
+# unreachable when the value is absent. Rewriting every such test to satisfy
+# the analyzer makes the tests worse, and blanket NOLINT comments scattered
+# through the suite hide the cases where the warning would be correct.
+#
+# The check stays ON for src/, where it is genuinely useful and where there
+# are no ASSERT_* macros to confuse it.
