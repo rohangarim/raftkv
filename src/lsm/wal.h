@@ -32,6 +32,7 @@
 #include <string_view>
 #include <vector>
 
+#include "lsm/file.h"
 #include "lsm/status.h"
 
 namespace raftkv::lsm {
@@ -56,13 +57,9 @@ class WalWriter {
   Status Close();
 
  private:
-  WalWriter(int fd, std::filesystem::path path);
+  explicit WalWriter(std::unique_ptr<WritableFile> file);
 
-  Status FlushBuffer();
-
-  int fd_ = -1;
-  std::filesystem::path path_;
-  std::string buffer_;
+  std::unique_ptr<WritableFile> file_;
   uint64_t bytes_written_ = 0;
 };
 
