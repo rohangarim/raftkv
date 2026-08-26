@@ -15,7 +15,7 @@ if [ ! -f "${DB}" ]; then
   exit 1
 fi
 
-files=$(git ls-files 'src/*.cc' 'test/*.cc' 'bench/*.cc')
+files=$(git ls-files --cached --others --exclude-standard 'src/*.cc' 'test/*.cc' 'bench/*.cc')
 if [ -z "${files}" ]; then
   echo "tidy: no source files yet"
   exit 0

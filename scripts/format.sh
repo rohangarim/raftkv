@@ -11,7 +11,11 @@ if [ -d /opt/homebrew/opt/llvm/bin ]; then
   export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
 fi
 
-files=$(git ls-files '*.cc' '*.h' '*.cpp' '*.hpp')
+# --others --exclude-standard includes files that are not yet tracked.
+# Plain `git ls-files` sees only tracked files, which silently skipped every
+# new source file until after its first commit -- exactly when formatting it
+# matters most.
+files=$(git ls-files --cached --others --exclude-standard '*.cc' '*.h' '*.cpp' '*.hpp')
 if [ -z "${files}" ]; then
   echo "format: no source files yet"
   exit 0
