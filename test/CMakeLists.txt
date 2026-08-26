@@ -19,3 +19,15 @@ raftkv_test(log_test
 raftkv_test(admin_grpc_test
   SOURCES admin_grpc_test.cc
   LIBS raftkv_transport)
+
+raftkv_test(lsm_coding_test
+  SOURCES lsm_coding_test.cc
+  LIBS raftkv_lsm)
+
+raftkv_test(lsm_wal_test
+  SOURCES lsm_wal_test.cc
+  LIBS raftkv_lsm)
+
+raftkv_test(lsm_memtable_test
+  SOURCES lsm_memtable_test.cc
+  LIBS raftkv_lsm)
