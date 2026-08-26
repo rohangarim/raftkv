@@ -12,11 +12,15 @@ C++20.
   kills leaders, then checks the recorded history for linearizability
   violations.
 
-> **Status: Phase 0 of 10 complete.** The build system, the sanitizer gates, and
-> one end-to-end gRPC round trip work. There is no Raft implementation yet, no
-> storage engine, no sharding, and no measured performance. Every number in
-> this file will arrive with a link to raw output in `results/`; there are no
-> numbers in it today because nothing has been measured yet.
+> **Status: Phases 0 and 1a complete.** The build system, the sanitizer gates,
+> and the storage engine work: WAL with torn-write recovery, SSTables,
+> compaction, and consistent snapshots, under 87 tests that pass clean under
+> ASan, UBSan, and TSan.
+>
+> There is no Raft implementation yet, no state-machine adapter, no sharding,
+> and **no measured performance**. Every number in this file will arrive with a
+> link to raw output in `results/`; there are none today because nothing has
+> been benchmarked yet.
 
 ## Build
 
@@ -80,7 +84,8 @@ src/
   raft/         consensus core: deterministic, no networking, no threads
   transport/    gRPC client and server adapters
   storage/      raft log, WAL, persistent metadata (separate from the LSM WAL)
-  statemachine/ LSM engine and the Raft state-machine adapter
+  lsm/          storage engine: WAL, memtable, SSTable, compaction, snapshots
+  statemachine/ Raft state-machine adapter over the LSM engine
   shard/        consistent hash ring, shard map, placement
   server/       node process: hosts N raft groups
   client/       client library: routing, leader cache, retry, dedup
@@ -117,6 +122,10 @@ Current and permanent, stated up front rather than discovered by a reader:
 - **No live resharding.** The shard map is fixed at cluster start.
 - **No membership change.** Adding or removing a node means restarting the
   cluster with a new configuration.
+- **The LSM engine uses full compaction, not leveled compaction.** L0 merges
+  into a single L1 file. Write amplification therefore grows with database
+  size. Fine for a bounded benchmark keyspace, wrong for a large one; real
+  leveled compaction is the documented next step.
 - **Docker on a single machine is not a real network.** The chaos harness runs
   five containers on one host. It can drop, delay, and partition packets, but
   it cannot reproduce a real WAN's failure modes, and its `fsync` goes through
