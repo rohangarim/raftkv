@@ -313,3 +313,132 @@ it.
 
 **Cost:** A genuinely hung test binary now takes two minutes to report instead
 of five seconds.
+
+---
+
+## D-0013: We write the LSM engine ourselves; it lives in src/lsm/
+
+**Phase:** 1a. Refines D-0001.
+
+**What:** `src/lsm/` holds a complete storage engine: WAL, memtable, SSTable,
+compaction, snapshots. `src/statemachine/` stays thin and will hold only the
+Raft adapter (Phase 1b).
+
+**Why:** The original layout put the engine behind `statemachine/` on the
+assumption it was an external dependency being wrapped. Once we are writing it,
+it is a peer component with its own tests, not an implementation detail of the
+adapter.
+
+**Cost:** One more top-level source directory than the original plan.
+
+---
+
+## D-0014: Apply does not fsync; the Raft log is the durability backstop
+
+**Phase:** 1a. This is the load-bearing decision of the storage design.
+
+**What:** `DB::Write` appends to the WAL but does not fsync by default.
+`Options::sync_on_write` and `WriteOptions::sync` force it. `DB::SyncWal()`
+exists as an explicit durability barrier.
+
+**Why:** The state machine needs (effect, `last_applied_index`) to be ATOMIC,
+not durable. Both live in the same `WriteBatch`, hence in the same WAL record,
+hence behind a single CRC. A crash mid-append leaves a bad CRC, recovery
+discards that record whole, and the effect and its index roll back together.
+Whatever is lost is replayable from Raft's own durable log starting at the
+recovered index.
+
+Requiring an fsync here would mean two fsyncs per client write -- one for the
+Raft log, one for the state machine -- roughly halving write throughput to
+protect data that was already protected.
+
+The invariant that replaces it, and that Phase 5 must respect: **never compact
+the Raft log past what the LSM has durably persisted.** `SyncWal()` is called
+before snapshot-driven Raft log truncation, not on the write path.
+
+`test/lsm_db_test.cc::EffectAndAppliedIndexRollBackTogether` is the executable
+form of this argument: it writes two complete batches, tears the third, and
+asserts that both the value and the applied index recover to 2.
+
+**Alternative:** fsync every apply. Simpler to explain, materially slower, and
+protects nothing that Raft was not already protecting.
+
+**Cost:** Correctness now depends on a cross-component invariant rather than on
+a local guarantee. If Phase 5 truncates the Raft log without calling
+`SyncWal()` first, data is genuinely lost and no test in `src/lsm/` will catch
+it. That test has to live at the Raft layer.
+
+---
+
+## D-0015: macOS durability requires F_FULLFSYNC, not fsync
+
+**Phase:** 1a
+
+**What:** `WritableFile::Sync` issues `fcntl(F_FULLFSYNC)` on Apple platforms
+and `fdatasync` elsewhere. Directory syncs use plain `fsync` on both.
+
+**Why:** On macOS, `fsync()` pushes data to the drive but does not force the
+drive's own write cache to persistent media. A benchmark that used `fsync`
+would report durable-write numbers that are not durable, and the Phase 8
+baseline (`--fsync_per_entry=true`) would be measuring the wrong thing.
+
+**Alternative:** Use `fsync` and note the caveat. Rejected: the point of the
+baseline is that it is honest.
+
+**Cost:** `F_FULLFSYNC` is much slower than `fsync`, so macOS sync-mode numbers
+will look worse than Linux `fdatasync` numbers for reasons that have nothing to
+do with this code. The README has to say so when those numbers appear.
+
+---
+
+## D-0016: SSTables record their maximum sequence number in the footer
+
+**Phase:** 1a
+
+**What:** The footer carries `max_sequence` alongside the index offsets.
+Recovery takes the maximum across the WAL and every table.
+
+**Why:** Found by a failing test, not by design review. Once a memtable is
+flushed, its WAL is deleted -- that is what bounds recovery time. So after a
+flush the WAL no longer knows how far sequence numbers had advanced, and a
+reopened database resumed at sequence 0.
+
+The failure mode is worth remembering because it is silent. Reads run at
+`last_sequence_` as their snapshot, so a snapshot of 0 hides every record ever
+written. The database did not report corruption or an error; it reported that
+it was empty.
+
+**Alternative:** A separate MANIFEST file, which is what LevelDB does and which
+also tracks which files belong to which level. That is the right answer once
+levels get more complicated than "L0 and L1"; the footer field is the smaller
+change that fully solves the problem we have.
+
+**Cost:** Eight bytes per table, and the footer size changed, so any table
+written before this commit is unreadable. Nothing has shipped, so no migration.
+
+---
+
+## D-0017: Write() releases the writer lock before triggering a flush
+
+**Phase:** 1a
+
+**What:** `DB::Write` scopes its `write_mutex_` guard and calls `MaybeFlush()`
+after releasing it.
+
+**Why:** `FlushMemTable` and `CompactRange` each acquire `write_mutex_`
+themselves. Holding it across `MaybeFlush()` deadlocked on a non-recursive
+mutex. The symptom was not an error but a hung write, which surfaced as a
+ctest timeout after two minutes and looked at first like slow I/O.
+
+The alternative fix -- making the mutex recursive -- was rejected. A recursive
+mutex would have made this deadlock disappear while leaving the underlying
+confusion about which function owns which lock intact, and that confusion gets
+much more expensive once Phase 3 adds the Ready loop.
+
+**Alternative:** Unlocked internal variants (`FlushMemTableLocked`) called from
+inside the critical section. Slightly faster, and worth doing if flush latency
+shows up in a profile.
+
+**Cost:** A narrow window between releasing the lock and calling `MaybeFlush`
+in which another writer can add to the memtable. Harmless: the flush trigger is
+a threshold, not a hard limit.
