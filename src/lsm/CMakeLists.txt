@@ -1,5 +1,6 @@
 add_library(raftkv_lsm STATIC
   crc32c.cc
+  db.cc
   file.cc
   memtable.cc
   sstable.cc
