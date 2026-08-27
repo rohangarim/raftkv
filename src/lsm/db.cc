@@ -1,6 +1,7 @@
 #include "lsm/db.h"
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <utility>
 
@@ -465,6 +466,100 @@ Status DB::CompactRange() {
 
   LOG_DEBUG("lsm: compacted %zu tables into %s", inputs.size(), path.string().c_str());
   return Status::Ok();
+}
+
+Status DB::ScanAll(const std::function<Status(std::string_view key, std::string_view value)>& fn) {
+  RAFTKV_RETURN_IF_ERROR(FlushMemTable());
+
+  size_t table_count = 0;
+  {
+    const std::shared_lock<std::shared_mutex> read_state(state_mutex_);
+    table_count = l0_.size() + (l1_ != nullptr ? 1 : 0);
+  }
+  if (table_count >= 2) {
+    RAFTKV_RETURN_IF_ERROR(CompactRange());
+  }
+
+  std::shared_ptr<SsTable> table;
+  {
+    const std::shared_lock<std::shared_mutex> read_state(state_mutex_);
+    if (!l0_.empty()) {
+      table = l0_.front();
+    } else {
+      table = l1_;
+    }
+  }
+  if (table == nullptr) {
+    return Status::Ok();
+  }
+
+  // Records arrive in ascending user key, descending sequence. The first
+  // record for a user key is therefore its newest version; later ones are
+  // superseded history and must be skipped, or a scan would emit stale values
+  // alongside current ones.
+  auto it = table->NewIterator();
+  std::string previous_user_key;
+  bool have_previous = false;
+  while (true) {
+    std::string_view internal_key;
+    std::string_view value;
+    const Status s = it->Next(&internal_key, &value);
+    if (s.ErrCode() == Code::kNotFound) {
+      break;
+    }
+    RAFTKV_RETURN_IF_ERROR(s);
+    if (!IsValidInternalKey(internal_key)) {
+      return Status::Corruption("scan: record key shorter than its tag");
+    }
+
+    const std::string_view user_key = UserKeyOf(internal_key);
+    if (have_previous && user_key == previous_user_key) {
+      continue;
+    }
+    previous_user_key.assign(user_key);
+    have_previous = true;
+
+    if (TypeOf(PackedOf(internal_key)) == ValueType::kDeletion) {
+      continue;  // newest version is a tombstone: the key is gone
+    }
+    RAFTKV_RETURN_IF_ERROR(fn(user_key, value));
+  }
+  return Status::Ok();
+}
+
+Status DB::DestroyContents() {
+  const std::lock_guard<std::mutex> writer_lock(write_mutex_);
+
+  RAFTKV_RETURN_IF_ERROR(wal_->Close());
+
+  std::vector<std::filesystem::path> victims;
+  {
+    const std::lock_guard<std::shared_mutex> write_state(state_mutex_);
+    for (const auto& table : l0_) {
+      victims.push_back(table->Path());
+    }
+    if (l1_ != nullptr) {
+      victims.push_back(l1_->Path());
+    }
+    l0_.clear();
+    l1_.reset();
+    mem_ = std::make_unique<MemTable>();
+    last_sequence_ = 0;
+    next_file_number_ = 1;
+  }
+
+  std::error_code ec;
+  for (const auto& victim : victims) {
+    std::filesystem::remove(victim, ec);
+  }
+  std::filesystem::remove(WalPath(), ec);
+
+  auto reopened = WalWriter::Open(WalPath());
+  if (!reopened.IsOk()) {
+    return reopened.GetStatus();
+  }
+  wal_ = reopened.TakeValue();
+  return SyncDirectory(options_.dir);
 }
 
 }  // namespace raftkv::lsm

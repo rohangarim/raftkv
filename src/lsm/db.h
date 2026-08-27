@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -118,6 +119,21 @@ class DB {
 
   // Merges every L0 table and L1 into a single new L1 table.
   Status CompactRange();
+
+  // Visits every live key exactly once, in ascending user-key order, skipping
+  // deleted keys.
+  //
+  // Implemented by flushing and compacting down to a single table and scanning
+  // it, rather than by merging iterators across the memtable and every level.
+  // That is simple and obviously correct, and it costs a full compaction --
+  // this call blocks writes for its duration. A merging iterator is the
+  // documented replacement if snapshot latency shows up in a profile.
+  Status ScanAll(const std::function<Status(std::string_view key, std::string_view value)>& fn);
+
+  // Deletes all data and resets to an empty database. Used by snapshot
+  // restore, which must replace state wholesale rather than merge into it:
+  // merging would leave keys that the snapshot's author had deleted.
+  Status DestroyContents();
 
   // Introspection for tests.
   size_t NumL0Tables() const;
