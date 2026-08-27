@@ -1,4 +1,5 @@
 raftkv_proto_library(raftkv_proto
   PROTOS
     admin.proto
-    kv.proto)
+    kv.proto
+    raft.proto)

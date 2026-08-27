@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package raftkv.proto;
+
+option optimize_for = SPEED;
+
+// Raft wire format. Also the in-memory representation used by the consensus
+// core: there is deliberately no second set of hand-written structs and no
+// conversion layer between them, because a conversion bug between an internal
+// type and its wire form is easy to write and invisible until a real network
+// is involved.
+
+enum EntryType {
+  ENTRY_NORMAL = 0;
+  // Appended by a new leader on election so it can advance its commit index
+  // without waiting for client traffic. Carries no client data.
+  ENTRY_NOOP = 1;
+  // Reserved. Membership change is out of scope for v1; the tag exists so
+  // adding it later does not renumber anything.
+  ENTRY_CONFIG = 2;
+}
+
+message Entry {
+  uint64 term = 1;
+  uint64 index = 2;
+  EntryType type = 3;
+  bytes data = 4;
+}
+
+// The state Figure 2 requires to be durable before responding to any RPC.
+message HardState {
+  uint64 term = 1;
+  // Candidate voted for in `term`; 0 means none, so node ids start at 1.
+  uint64 vote = 2;
+  uint64 commit = 3;
+}
+
+enum MessageType {
+  MSG_UNKNOWN = 0;
+  MSG_REQUEST_VOTE = 1;
+  MSG_REQUEST_VOTE_RESP = 2;
+  MSG_APPEND = 3;
+  MSG_APPEND_RESP = 4;
+  MSG_HEARTBEAT = 5;
+  MSG_HEARTBEAT_RESP = 6;
+  MSG_SNAPSHOT = 7;
+  MSG_SNAPSHOT_RESP = 8;
+}
+
+message SnapshotMetadata {
+  uint64 last_included_index = 1;
+  uint64 last_included_term = 2;
+}
+
+message Message {
+  MessageType type = 1;
+  uint64 from = 2;
+  uint64 to = 3;
+  // Sender's term. A message from a higher term forces the receiver to step
+  // down; one from a lower term is stale and rejected.
+  uint64 term = 4;
+
+  // AppendEntries: index and term of the entry preceding `entries`.
+  // RequestVote: index and term of the candidate's last log entry.
+  uint64 log_term = 5;
+  uint64 index = 6;
+
+  repeated Entry entries = 7;
+
+  // Leader's commit index.
+  uint64 commit = 8;
+
+  // Response messages: the request was refused.
+  bool reject = 9;
+
+  // Fast backtracking on a rejected AppendEntries.
+  //
+  // Decrementing next_index one entry per round trip costs O(n) round trips to
+  // repair a long divergence. Instead the follower reports the term of the
+  // conflicting entry and the first index it holds for that term, so the
+  // leader can skip the entire conflicting term in one step.
+  uint64 conflict_term = 10;
+  uint64 conflict_index = 11;
+
+  SnapshotMetadata snapshot = 12;
+}

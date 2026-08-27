@@ -43,3 +43,12 @@ raftkv_test(lsm_db_test
 raftkv_test(state_machine_test
   SOURCES state_machine_test.cc
   LIBS raftkv_statemachine)
+
+raftkv_test(raft_log_test
+  SOURCES raft_log_test.cc
+  LIBS raftkv_raft)
+
+raftkv_test(raft_cluster_test
+  SOURCES raft_cluster_test.cc raft_harness.cc
+  LIBS raftkv_raft)
+target_include_directories(raft_cluster_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

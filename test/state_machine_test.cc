@@ -268,7 +268,7 @@ TEST_F(StateMachineTest, IdenticalCommandSequencesProduceIdenticalState) {
   ASSERT_TRUE(first_snapshot.IsOk()) << first_snapshot.GetStatus().ToString();
   auto first_bytes = (*first_snapshot)->ReadChunk(0, (*first_snapshot)->Size());
   ASSERT_TRUE(first_bytes.IsOk());
-  const std::string a = *first_bytes;
+  const std::string& a = *first_bytes;
 
   Open(&other_dir);
   for (size_t i = 0; i < commands.size(); ++i) {

@@ -1,4 +1,5 @@
 add_subdirectory(common)
 add_subdirectory(lsm)
+add_subdirectory(raft)
 add_subdirectory(statemachine)
 add_subdirectory(transport)

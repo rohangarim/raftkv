@@ -85,11 +85,12 @@ Status KvStateMachine::LoadAppliedIndex() {
   if (!got.IsOk()) {
     return got.GetStatus();
   }
-  if (!got->has_value()) {
+  const std::optional<std::string>& stored = *got;
+  if (!stored.has_value()) {
     last_applied_index_ = 0;
     return Status::Ok();
   }
-  const std::string& raw = **got;
+  const std::string& raw = *stored;
   if (raw.size() != 8) {
     return Status::Corruption("applied index is not 8 bytes");
   }
@@ -116,11 +117,12 @@ Result<std::optional<proto::SessionEntry>> KvStateMachine::LookupSession(
   if (!got.IsOk()) {
     return got.GetStatus();
   }
-  if (!got->has_value()) {
+  const std::optional<std::string>& stored = *got;
+  if (!stored.has_value()) {
     return std::optional<proto::SessionEntry>{};
   }
   proto::SessionEntry entry;
-  if (!entry.ParseFromString(**got)) {
+  if (!entry.ParseFromString(*stored)) {
     return Status::Corruption("session entry failed to parse");
   }
   return std::optional<proto::SessionEntry>{std::move(entry)};
@@ -148,8 +150,9 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
         return result;
       }
 
-      const bool exists = current->has_value();
-      const bool matches = cas.has_expected() ? (exists && **current == cas.expected()) : !exists;
+      const std::optional<std::string>& observed = *current;
+      const bool exists = observed.has_value();
+      const bool matches = cas.has_expected() ? (exists && *observed == cas.expected()) : !exists;
       if (!matches) {
         // A failed comparison is a successful apply that reports a negative
         // answer, not an error. Conflating the two would make the client retry
@@ -157,7 +160,7 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
         result.status = Status::Ok();
         result.cas_mismatch = true;
         if (exists) {
-          result.value = **current;
+          result.value = *observed;
         }
         return result;
       }
