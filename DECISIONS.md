@@ -610,3 +610,131 @@ nothing to roll back to.
 incremental. Phase 5 streams the snapshot over the wire in chunks but still
 assembles it in memory here; spilling to a temporary file is the fix when
 snapshots outgrow RAM.
+
+---
+
+## D-0026: The consensus core uses generated protobuf types directly
+
+**Phase:** 2
+
+**What:** `src/raft/` operates on `proto::Message`, `proto::Entry`, and
+`proto::HardState` from `raft.proto`. There is no parallel set of internal
+structs and no conversion layer.
+
+**Why:** The alternative means two definitions of every message plus a
+hand-written translation between them, and a conversion bug is both easy to
+write and invisible until a real network is involved -- Phase 3 at the
+earliest, and possibly not until Phase 10. etcd made the same call.
+
+The determinism argument from D-0018 still holds: the core parses what it
+receives and never re-serializes it before acting on it.
+
+**Alternative:** Plain structs with explicit conversion, which decouples the
+core from protobuf and would make an alternative transport easier.
+
+**Cost:** The deterministic core depends on protobuf. Acceptable, since the
+whole system already does.
+
+---
+
+## D-0027: Ready/Advance makes the durability ordering enforceable
+
+**Phase:** 2
+
+**What:** `ReadyToProcess()` returns hard state, entries to persist, outgoing
+messages, and committed entries together. The caller must persist the first two
+before sending the third, then call `Advance()`.
+
+**Why:** Figure 2 requires `currentTerm` and `votedFor` to be durable before
+responding to any RPC. Expressed as a rule, every call site has to remember it.
+Expressed as a data structure handed to one driver loop, there is exactly one
+place that can get it wrong -- and the Phase 2 harness deliberately implements
+that ordering so Phase 3's real driver has a reference to match.
+
+Reversing the order lets a node vote twice in one term across a crash, which
+breaks Election Safety directly.
+
+**Cost:** The core cannot act on its own; something must drive it. That is the
+point.
+
+---
+
+## D-0028: CheckQuorum, so an isolated leader steps down
+
+**Phase:** 2
+
+**What:** Once per election timeout, a leader counts the peers it has heard
+from. Below a quorum, it becomes a follower.
+
+**Why:** Found by a test that asserted something plain Figure 2 does not
+provide. A partitioned leader never learns of a higher term, so it stays in
+leader state indefinitely. That is safe for the log -- it cannot commit
+anything without a quorum -- but it leaves a node that believes it is the
+leader and would happily answer a read with stale data.
+
+My test asserted the minority side has no leader; the implementation was right
+by the paper and the test was wrong about what the paper guarantees. Rather
+than weaken the test, I implemented the property it was asking for, because
+Phase 4 needs it: shrinking the stale-leader window makes lease reads defensible
+and cuts failover time.
+
+CheckQuorum does not replace ReadIndex. Phase 4 still confirms leadership with
+a heartbeat quorum on every linearizable read; this reduces the window rather
+than closing it.
+
+**Cost:** A leader on a briefly flaky link can step down unnecessarily,
+triggering an election that was not needed. That is a real availability cost,
+paid for a real correctness benefit.
+
+---
+
+## D-0029: The log reports where it truncated, because length comparison is not enough
+
+**Phase:** 2. Found by the randomized harness at seed 5; a genuine bug.
+
+**What:** `RaftLog::TruncateAndAppend` now reports `first_changed`, the lowest
+index whose content changed. `HandleAppend` lowers `persisted_index_` to just
+below it, so the rewritten entries are re-emitted for persistence.
+
+**Why:** `ReadyToProcess` originally decided what to persist by comparing
+`log_.LastIndex()` against `persisted_index_`. That misses the case that
+matters. When a follower truncates a conflicting suffix and refills it in the
+same step -- which is exactly what log repair does -- the log can end up the
+**same length** with **different entries**. `LastIndex() > persisted_index_` is
+false, nothing is emitted, and the durable log keeps the entries that were just
+discarded. The node then resurrects them on restart.
+
+The failure surfaced hundreds of steps later as a Log Matching violation on a
+node that looked healthy, which is why the harness checks invariants after
+every step rather than at the end of a run.
+
+An intermediate fix -- clamping `persisted_index_` to `LastIndex()` -- handled
+only the case where the log got shorter, and the bug survived it. The lesson
+worth keeping: *the length of a log says nothing about its contents.*
+
+**Alternative:** Emit the entire log on every truncation. Correct and wasteful.
+
+**Cost:** One more out-parameter on a hot path.
+
+---
+
+## D-0030: A failing seed is a reproducible bug report
+
+**Phase:** 2
+
+**What:** The randomized soak runs 2000 seeds by default. Setting `RAFTKV_SEED`
+replays exactly one and turns the protocol trace on:
+
+```
+RAFTKV_SEED=5 ./build/test/raft_cluster_test --gtest_filter='*Randomized*'
+```
+
+**Why:** Debugging seed 5 took three wrong hypotheses before the trace showed
+what actually happened -- the follower repaired its log correctly and then
+reverted on restart, which pointed at persistence rather than at replication.
+Guessing was slower than looking, every time.
+
+Invariant failures also dump both nodes' full logs, because "these two byte
+strings differ" costs an hour of re-deriving state the harness already had.
+
+**Cost:** 2000 seeds is roughly 13 seconds of the test suite. Worth it.
