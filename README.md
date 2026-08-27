@@ -8,14 +8,17 @@ whether any of it actually holds up.
 
 ## Where this is
 
-Phases 0 through 1b are done: the build, the storage engine, and the replicated
-state machine. Phase 2 — the Raft core — is in progress. There is no working
-cluster yet, and **no performance numbers**, because nothing has been
-benchmarked. When numbers appear here, each one will link to raw output in
-`results/` produced by a committed script. If there's no file, there's no
-number.
+Phases 0 through 2 are done: the build, the storage engine, the replicated state
+machine, and the Raft consensus core. The core has no networking yet — Phase 3
+puts it on gRPC and a real disk — so there is no running cluster, and **no
+performance numbers**, because nothing has been benchmarked. When numbers appear
+here, each will link to raw output in `results/` produced by a committed script.
+No file, no number.
 
-110 tests, green under ASan, UBSan, and TSan.
+141 tests, green under ASan, UBSan, and TSan. The Raft core additionally runs
+2000 randomized fault-injection scenarios — partitions, crashes, restarts,
+dropped, delayed, reordered, and duplicated messages — checking all five Raft
+safety invariants after every single step.
 
 ## Build
 
@@ -67,6 +70,30 @@ case from the Raft paper, and it's the thing most from-scratch implementations
 get wrong. A leader that commits an earlier-term entry just because a majority
 stores it can lose that entry to a later leader with a different history. Such
 entries commit only indirectly, once a current-term entry above them commits.
+
+## Testing the consensus core
+
+The Raft core has no threads, no sockets, and no clock — time enters only
+through `Tick()`. That means an entire five-node cluster runs inside one unit
+test, and a run is a pure function of its seed. The harness delays, reorders,
+drops, and duplicates messages, partitions arbitrary subsets, and kills and
+restarts nodes with nothing but their persisted state.
+
+All five safety invariants are checked after *every* step, not at the end, so a
+violation is caught where it happens rather than surfacing later as bad data.
+A failing seed replays exactly:
+
+```bash
+RAFTKV_SEED=5 ./build/test/raft_cluster_test --gtest_filter='*Randomized*'
+```
+
+That's how the nastiest bug so far got found. A follower repaired its log
+correctly, then reverted on restart. The cause: deciding what to persist by
+comparing log *lengths*. When a follower truncates a conflicting suffix and
+refills it in the same step, the log ends up the same length with different
+entries — so nothing got written, and the discarded entries came back after a
+crash. It surfaced hundreds of steps later on a node that looked perfectly
+healthy.
 
 Every non-obvious choice is written down in [`DECISIONS.md`](DECISIONS.md) with
 its alternative and what it costs. If something here looks strange, the reason
