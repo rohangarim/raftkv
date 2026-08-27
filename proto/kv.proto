@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package raftkv.proto;
+
+option optimize_for = SPEED;
+
+// Replicated command format.
+//
+// These bytes are what Raft replicates. Critically, the leader serializes a
+// Command exactly once and every replica applies the identical bytes -- no
+// replica ever re-encodes one. That is what makes protobuf safe to use here
+// despite its serialization not being canonical across implementations:
+// determinism comes from replicating bytes, not from re-deriving them.
+//
+// If any code path ever round-trips a Command through parse-then-reserialize
+// before applying it, replicas can diverge. Do not add one.
+
+// Applied to the state machine in log order.
+message Command {
+  // Stable per-client identifier, used with `seq` for exactly-once semantics.
+  // A client keeps the same id across reconnects and leader failovers.
+  string client_id = 1;
+
+  // Monotonic per-client sequence number. A repeat of a seq that has already
+  // been applied returns the cached result instead of applying twice.
+  uint64 seq = 2;
+
+  oneof op {
+    PutOp put = 3;
+    DeleteOp delete = 4;
+    CasOp cas = 5;
+  }
+}
+
+message PutOp {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message DeleteOp {
+  bytes key = 1;
+}
+
+// Compare-and-swap. Applies only if the current value matches `expected`.
+message CasOp {
+  bytes key = 1;
+  // Absent `expected` means "only if the key does not currently exist", which
+  // is how a caller expresses create-if-absent.
+  optional bytes expected = 2;
+  bytes new_value = 3;
+}
+
+// The outcome of applying one Command. Cached in the session table so a
+// retried command returns the same answer it did the first time.
+message CommandResult {
+  enum Code {
+    OK = 0;
+    NOT_FOUND = 1;
+    CAS_MISMATCH = 2;
+    INVALID = 3;
+  }
+  Code code = 1;
+  // Present for reads and for a CAS that reports the value it found.
+  optional bytes value = 2;
+}
+
+// Persisted per-client session entry.
+message SessionEntry {
+  uint64 last_seq = 1;
+  CommandResult last_result = 2;
+  // Applied index when this session was last touched. Present so that session
+  // expiry can one day be driven by log position, which is deterministic
+  // across replicas, rather than by wall-clock time, which is not.
+  uint64 last_touch_index = 3;
+}
+
+// Header written at the front of a state machine snapshot.
+message SnapshotHeader {
+  uint64 last_included_index = 1;
+  uint64 last_included_term = 2;
+}
