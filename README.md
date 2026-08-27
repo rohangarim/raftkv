@@ -12,15 +12,16 @@ C++20.
   kills leaders, then checks the recorded history for linearizability
   violations.
 
-> **Status: Phases 0 and 1a complete.** The build system, the sanitizer gates,
-> and the storage engine work: WAL with torn-write recovery, SSTables,
-> compaction, and consistent snapshots, under 87 tests that pass clean under
-> ASan, UBSan, and TSan.
+> **Status: Phases 0, 1a, and 1b complete.** The build system, the sanitizer
+> gates, the storage engine, and the replicated state machine work: WAL with
+> torn-write recovery, SSTables, compaction, consistent snapshots, and
+> exactly-once command application via a persisted client session table. 110
+> tests, clean under ASan, UBSan, and TSan.
 >
-> There is no Raft implementation yet, no state-machine adapter, no sharding,
-> and **no measured performance**. Every number in this file will arrive with a
-> link to raw output in `results/`; there are none today because nothing has
-> been benchmarked yet.
+> There is **no Raft implementation yet**, no sharding, and **no measured
+> performance**. Every number in this file will arrive with a link to raw
+> output in `results/`; there are none today because nothing has been
+> benchmarked yet.
 
 ## Build
 
@@ -122,6 +123,13 @@ Current and permanent, stated up front rather than discovered by a reader:
 - **No live resharding.** The shard map is fixed at cluster start.
 - **No membership change.** Adding or removing a node means restarting the
   cluster with a new configuration.
+- **The client session table never expires entries.** Every client id ever
+  seen persists forever. Expiry has to be deterministic across replicas, so a
+  wall-clock TTL is not an option; the correct mechanism is expiry by
+  applied-index age at snapshot time, which is not built. Fine for a fixed
+  client set, wrong for a real deployment.
+- **Snapshotting blocks writes for a full compaction.** `TakeSnapshot` flushes
+  and compacts to a single table rather than merging iterators across levels.
 - **The LSM engine uses full compaction, not leveled compaction.** L0 merges
   into a single L1 file. Write amplification therefore grows with database
   size. Fine for a bounded benchmark keyspace, wrong for a large one; real

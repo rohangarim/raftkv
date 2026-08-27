@@ -442,3 +442,171 @@ shows up in a profile.
 **Cost:** A narrow window between releasing the lock and calling `MaybeFlush`
 in which another writer can add to the memtable. Harmless: the flush trigger is
 a threshold, not a hard limit.
+
+---
+
+## D-0018: Protobuf commands are safe because we never re-serialize them
+
+**Phase:** 1b
+
+**What:** `proto/kv.proto` defines `Command`, which is what Raft replicates.
+
+**Why this needs saying:** Protobuf serialization is not canonical. The same
+message can encode to different bytes across library versions and language
+implementations, which normally disqualifies it from a replicated state
+machine, where replicas must agree byte for byte.
+
+It is safe here because of an invariant, not a property of protobuf: the leader
+serializes a `Command` exactly once, Raft replicates those bytes verbatim, and
+every replica parses the identical bytes. Parsing is deterministic. Determinism
+would break the instant any code path parsed a command and re-serialized it
+before applying, so `kv.proto` carries a comment saying not to add one.
+
+**Alternative:** A hand-rolled canonical encoding, which removes the footgun
+entirely at the cost of writing and testing our own wire format.
+
+**Cost:** A latent trap for a future contributor. The mitigation is a comment
+and this entry, which is weaker than a mechanism.
+
+---
+
+## D-0019: One-byte key namespaces, applied by the adapter
+
+**Phase:** 1b
+
+**What:** Every key stored in the engine carries a namespace tag: `'u'` user
+data, `'m'` metadata, `'s'` sessions.
+
+**Why:** Client keys are arbitrary bytes, so metadata cannot be hidden behind a
+magic prefix that a client could also produce -- including `\0`-prefixed keys.
+Because the tag is prepended by the adapter and never taken from client input,
+no request can address the metadata or session namespaces.
+`ClientKeysCannotReachInternalNamespaces` writes a client key literally named
+`applied_index` and asserts the real applied index is untouched.
+
+**Cost:** One byte per key, and the tags can never change without making every
+existing database unreadable.
+
+---
+
+## D-0020: Effect, session entry, and applied index share one WriteBatch
+
+**Phase:** 1b. The point of D-0014's machinery.
+
+**What:** A single `Apply()` writes the user effect, the updated session entry,
+and the new applied index into one `lsm::WriteBatch`.
+
+**Why:** One batch is one WAL record behind one CRC, so a crash leaves all
+three or none. Each weaker combination is a specific bug:
+
+- effect without session entry -> the client's retry is applied a second time
+- session entry without effect -> the retry returns success for a write that
+  never happened, silently losing data
+- either without the applied index -> Raft replays the entry and applies it
+  again
+
+**Alternative:** Three separate writes with a fsync between them. Correct and
+roughly three times slower.
+
+**Cost:** None material. This is what the storage engine was built for.
+
+---
+
+## D-0021: A failed CAS is a successful apply
+
+**Phase:** 1b
+
+**What:** `ApplyResult` carries `cas_mismatch` separately from `status`. A
+comparison that fails returns `Status::Ok()` with `cas_mismatch` set.
+
+**Why:** They mean different things to a client. A non-Ok status means "this
+did not happen, retry is reasonable." A CAS mismatch means "this happened
+exactly as specified and the answer is no." Conflating them makes a client
+retry a command that already did its job, which for a non-idempotent operation
+is how a compare-and-swap loop turns into a livelock.
+
+**Cost:** Two fields where a naive design has one.
+
+---
+
+## D-0022: Only the most recent result is cached; older sequences are rejected
+
+**Phase:** 1b
+
+**What:** The session table stores one `last_seq` and one `last_result` per
+client. A repeat of `last_seq` returns the cached result. A sequence lower than
+`last_seq` returns an error.
+
+**Why:** Answering a stale sequence would require retaining every result ever
+produced for that client. The alternative -- silently re-applying it -- is
+worse than an error: `AnOlderSequenceIsRejectedRatherThanReapplied` shows it
+rolling a key back to a superseded value.
+
+A correct client never sends a stale sequence, because it does not advance
+`seq` until the previous one is acknowledged. So this error indicates a client
+bug, and it should be loud.
+
+**Cost:** A client that loses track of its own sequence numbers cannot recover
+by guessing; it must start a new session.
+
+---
+
+## D-0023: The session table grows without bound
+
+**Phase:** 1b. A known gap, recorded rather than fixed.
+
+**What:** Every `client_id` ever seen keeps a session entry forever. There is
+no expiry.
+
+**Why not fixed now:** Expiry must be deterministic, because every replica has
+to expire the same entries at the same point in the log. A wall-clock TTL is
+exactly the wrong mechanism -- replica clocks differ, so they would expire
+different entries and diverge. The correct design is expiry by applied-index
+age, evaluated at snapshot time, which is why `SessionEntry` already carries
+`last_touch_index`.
+
+**Cost:** Unbounded growth proportional to the number of distinct clients over
+the cluster's lifetime. Acceptable for a benchmark and a chaos harness with a
+fixed client set; not acceptable for a real deployment. It is in the README
+limitations section.
+
+---
+
+## D-0024: TakeSnapshot forces a flush and a full compaction
+
+**Phase:** 1b
+
+**What:** `DB::ScanAll` flushes the memtable and compacts down to a single
+table, then scans it, taking the first record per user key.
+
+**Why:** A snapshot needs an ordered scan over the memtable and every level,
+deduplicated by user key. That wants a merging iterator, which does not exist
+yet. Compacting to one table makes the scan trivially correct: records arrive
+in ascending user key and descending sequence, so the first record for each key
+is its newest version, and a tombstone there means the key is gone.
+
+**Cost, stated plainly:** snapshotting blocks writes for the duration of a full
+compaction. If Phase 5 snapshots overlap a Phase 8 benchmark run, this will
+appear in p99 and it will be this decision, not the consensus code. The
+merging iterator is the fix, and it should be built when a profile shows the
+cost rather than pre-emptively.
+
+---
+
+## D-0025: RestoreSnapshot replaces state wholesale
+
+**Phase:** 1b
+
+**What:** `RestoreSnapshot` materializes the entire snapshot, then calls
+`DB::DestroyContents()`, then writes the snapshot's contents.
+
+**Why:** Merging a snapshot into existing state keeps keys the snapshot's
+author had deleted, so the restored replica silently diverges from the one it
+copied. Materializing before destroying matters too: restoring incrementally
+would leave the machine half-replaced if a chunk read failed midway, with
+nothing to roll back to.
+
+**Cost:** Peak memory of one whole snapshot, and the restore is not
+incremental. Phase 5 streams the snapshot over the wire in chunks but still
+assembles it in memory here; spilling to a temporary file is the fix when
+snapshots outgrow RAM.
