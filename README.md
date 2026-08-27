@@ -1,32 +1,23 @@
 # raftkv
 
-A sharded, fault-tolerant, linearizable key-value store, built from scratch in
-C++20.
+A sharded, fault-tolerant, linearizable key-value store written from scratch in
+C++20. Raft consensus implemented from the paper — no etcd, no braft, no
+consensus library. gRPC on the wire, a hand-written LSM-tree engine underneath,
+and a Jepsen-style harness that partitions the network and kills leaders to see
+whether any of it actually holds up.
 
-- Raft consensus implemented from the paper. No etcd, no braft, no consensus
-  library.
-- gRPC for all node-to-node and client-to-node communication.
-- A hand-written LSM-tree storage engine as the replicated state machine.
-- Keyspace sharded across replica groups by consistent hashing.
-- Correctness checked by a Jepsen-style harness that partitions the network and
-  kills leaders, then checks the recorded history for linearizability
-  violations.
+## Where this is
 
-> **Status: Phases 0, 1a, and 1b complete.** The build system, the sanitizer
-> gates, the storage engine, and the replicated state machine work: WAL with
-> torn-write recovery, SSTables, compaction, consistent snapshots, and
-> exactly-once command application via a persisted client session table. 110
-> tests, clean under ASan, UBSan, and TSan.
->
-> There is **no Raft implementation yet**, no sharding, and **no measured
-> performance**. Every number in this file will arrive with a link to raw
-> output in `results/`; there are none today because nothing has been
-> benchmarked yet.
+Phases 0 through 1b are done: the build, the storage engine, and the replicated
+state machine. Phase 2 — the Raft core — is in progress. There is no working
+cluster yet, and **no performance numbers**, because nothing has been
+benchmarked. When numbers appear here, each one will link to raw output in
+`results/` produced by a committed script. If there's no file, there's no
+number.
+
+110 tests, green under ASan, UBSan, and TSan.
 
 ## Build
-
-Requires CMake 3.24+, Ninja, a C++20 compiler, and Git. Everything else is
-fetched and pinned by the build.
 
 ```bash
 cmake --preset default
@@ -34,113 +25,84 @@ cmake --build --preset default
 ctest --preset default
 ```
 
-The first configure runs `scripts/fetch_deps.sh`, which shallow-clones gRPC and
-GoogleTest into `.deps/` (about 600 MB), then builds gRPC, Protobuf, Abseil,
-BoringSSL, and re2 from source. That is minutes, not seconds. Subsequent builds
-reuse both.
+You need CMake 3.24+, Ninja, and a C++20 compiler. Everything else — gRPC,
+Protobuf, Abseil, GoogleTest — is pinned and fetched by the build. The first
+configure downloads about 600 MB and takes a few minutes; after that it's
+cached.
 
-`.deps/` is shared across build presets; object files are not. If a clone is
-interrupted, re-run `scripts/fetch_deps.sh` directly — it resumes from what it
-already has rather than starting over.
+`scripts/ci.sh` runs all four presets including the three sanitizers. That's the
+gate: nothing is "done" until it's green.
 
-If you already have a matching gRPC install:
+## How it fits together
 
-```bash
-cmake --preset default -DRAFTKV_USE_SYSTEM_GRPC=ON
-```
+A client hashes a key onto a consistent hash ring to find its shard, then talks
+to that shard's Raft group directly — no coordinator hop. Each group is an
+independent Raft instance with its own log, and one node process hosts several
+groups. A write goes through consensus, and once committed it's applied to that
+node's LSM engine, which is the replicated state machine.
 
-## Sanitizers
+The interesting part is the seam between Raft and storage. It's one narrow
+interface (`src/statemachine/state_machine.h`) and the consensus core knows
+nothing about how bytes reach a disk.
 
-Three sanitizer presets, each with its own build directory. All three must be
-green before a phase is considered done. TSan is not optional in this project;
-it is a threaded replication system and TSan is the only tool that finds the
-class of bug that shows up once a week in production.
+## Three decisions worth knowing about
 
-```bash
-scripts/ci.sh                # default + asan + ubsan + tsan
-scripts/ci.sh tsan           # just one
-```
+**Applying a command doesn't fsync.** The obvious design fsyncs the state
+machine on every apply, which means two fsyncs per write — one for the Raft log,
+one for storage. What apply actually needs is *atomicity* of the effect and the
+applied index, not durability. Both go into the same write batch, so they land
+in one WAL record behind one CRC: a crash mid-write discards both or neither,
+and anything lost is replayable from Raft's own durable log. The rule this trades
+for is *never compact the Raft log past what storage has durably persisted*.
 
-Sanitizer presets rebuild the fetched dependencies with the sanitizer enabled.
-That is slow and it is deliberate — see `DECISIONS.md` D-0004.
+**Commands carry a client id and sequence number.** When a leader dies
+mid-request, the client retries, and without dedup that write gets applied
+twice. So the state machine keeps a session table mapping each client to its
+last sequence and result, persisted in the same atomic batch as the write
+itself, and included in every snapshot. Skipping this is how a system passes
+all its own tests and then fails a linearizability checker.
 
-## Style
+**Only current-term entries commit by counting replicas.** This is the Figure 8
+case from the Raft paper, and it's the thing most from-scratch implementations
+get wrong. A leader that commits an earlier-term entry just because a majority
+stores it can lose that entry to a later leader with a different history. Such
+entries commit only indirectly, once a current-term entry above them commits.
 
-```bash
-scripts/format.sh            # rewrite in place
-scripts/format.sh --check    # CI mode
-scripts/tidy.sh              # clang-tidy against build/compile_commands.json
-```
-
-On macOS, `clang-format` and `clang-tidy` come from Homebrew LLVM
-(`brew install llvm`); the scripts add `/opt/homebrew/opt/llvm/bin` to `PATH`
-themselves.
+Every non-obvious choice is written down in [`DECISIONS.md`](DECISIONS.md) with
+its alternative and what it costs. If something here looks strange, the reason
+is probably there.
 
 ## Layout
 
 ```
-proto/          wire format; the single source of truth
-src/
-  common/       logging and small shared utilities
-  raft/         consensus core: deterministic, no networking, no threads
-  transport/    gRPC client and server adapters
-  storage/      raft log, WAL, persistent metadata (separate from the LSM WAL)
-  lsm/          storage engine: WAL, memtable, SSTable, compaction, snapshots
-  statemachine/ Raft state-machine adapter over the LSM engine
-  shard/        consistent hash ring, shard map, placement
-  server/       node process: hosts N raft groups
-  client/       client library: routing, leader cache, retry, dedup
-bench/          load generator, latency histograms, failover timer
-chaos/          nemesis scripts, history recorder, linearizability checker
-test/
-docker/
-results/        raw benchmark and chaos output, committed
-DECISIONS.md    one entry per real design decision
+proto/          wire format — the single source of truth
+src/raft/       consensus core: deterministic, no threads, no networking
+src/lsm/        storage engine: WAL, memtable, SSTables, compaction, snapshots
+src/statemachine/  the adapter Raft sees, plus the client session table
+src/transport/  gRPC adapters
+src/shard/      consistent hash ring and placement
+src/client/     routing, leader cache, retry, dedup
+bench/          load generator and latency histograms
+chaos/          nemesis, history recorder, linearizability checker
+results/        raw output, committed
 ```
 
-## Design
+## What this doesn't do
 
-Every non-obvious choice is written down in [`DECISIONS.md`](DECISIONS.md) with
-its alternative and its cost. If something in this repo looks strange, the
-reason is probably there.
+Worth saying plainly, since a system's limits are more useful than its claims:
 
-## Planned configuration
+- **No TLS, no auth.** Every channel is insecure. Not deployable as-is.
+- **No live resharding and no membership change.** The cluster config is fixed
+  at startup; changing it means a restart.
+- **Client sessions never expire.** Every client id ever seen is kept forever.
+  Expiry has to be deterministic across replicas, so a wall-clock TTL is wrong;
+  the right fix is expiry by log position, and it isn't built.
+- **Storage uses full compaction, not leveled.** Write amplification grows with
+  database size. Fine for a bounded benchmark, wrong for a large dataset.
+- **Snapshots block writes** for the length of a full compaction.
+- **Docker on one machine is not a real network.** The chaos harness can drop,
+  delay, and partition packets between five containers on one host. It cannot
+  reproduce a real WAN, and its fsync goes through a virtualization layer.
 
-- 5 nodes, 5 Raft groups, replication factor 3. Each node leads roughly one
-  group and follows roughly two.
-- Consistent hash ring, 160 virtual nodes per physical node — a number to be
-  justified against a measured distribution over 1M keys in Phase 6, not
-  against folklore.
-- Static cluster membership. Live membership change and live resharding are out
-  of scope for v1.
-
-## Limitations
-
-Current and permanent, stated up front rather than discovered by a reader:
-
-- **No TLS and no authentication.** All channels are insecure. Not deployable
-  as-is.
-- **No live resharding.** The shard map is fixed at cluster start.
-- **No membership change.** Adding or removing a node means restarting the
-  cluster with a new configuration.
-- **The client session table never expires entries.** Every client id ever
-  seen persists forever. Expiry has to be deterministic across replicas, so a
-  wall-clock TTL is not an option; the correct mechanism is expiry by
-  applied-index age at snapshot time, which is not built. Fine for a fixed
-  client set, wrong for a real deployment.
-- **Snapshotting blocks writes for a full compaction.** `TakeSnapshot` flushes
-  and compacts to a single table rather than merging iterators across levels.
-- **The LSM engine uses full compaction, not leveled compaction.** L0 merges
-  into a single L1 file. Write amplification therefore grows with database
-  size. Fine for a bounded benchmark keyspace, wrong for a large one; real
-  leveled compaction is the documented next step.
-- **Docker on a single machine is not a real network.** The chaos harness runs
-  five containers on one host. It can drop, delay, and partition packets, but
-  it cannot reproduce a real WAN's failure modes, and its `fsync` goes through
-  a virtualization layer.
-- **Benchmarks and chaos run in different environments** (native host and
-  Docker Linux respectively) and each result is labelled with the one it came
-  from. See `DECISIONS.md` D-0002.
-
-Further limitations will be added here as they become true, not removed as they
-become inconvenient.
+This list grows as things become true, and nothing comes off it just because
+it's inconvenient.
