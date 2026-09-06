@@ -100,7 +100,7 @@ class RaftNode {
   void Advance(const Ready& ready);
 
   uint64_t Id() const { return config_.id; }
-  Role role() const { return role_; }
+  Role CurrentRole() const { return role_; }
   uint64_t Term() const { return term_; }
   uint64_t Vote() const { return vote_; }
   uint64_t CommitIndex() const { return commit_index_; }

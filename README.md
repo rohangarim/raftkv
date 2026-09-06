@@ -15,10 +15,14 @@ performance numbers**, because nothing has been benchmarked. When numbers appear
 here, each will link to raw output in `results/` produced by a committed script.
 No file, no number.
 
-141 tests, green under ASan, UBSan, and TSan. The Raft core additionally runs
-2000 randomized fault-injection scenarios — partitions, crashes, restarts,
-dropped, delayed, reordered, and duplicated messages — checking all five Raft
-safety invariants after every single step.
+141 tests, green under ASan, UBSan, and TSan, with clang-tidy clean. The Raft
+core additionally runs 2000 randomized fault-injection scenarios — partitions,
+crashes, restarts, dropped, delayed, reordered, and duplicated messages —
+checking all five Raft safety invariants after every single step.
+
+Every number in this README is audited against a command that produced it. See
+[`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md), which also records the claims this
+project cannot yet support and why.
 
 ## Build
 

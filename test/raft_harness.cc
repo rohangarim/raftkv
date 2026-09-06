@@ -6,7 +6,7 @@ namespace {
 // A failure message that says only "these two bytes differ" costs an hour of
 // re-deriving state that the harness already had. Dump the whole log.
 std::string FormatLog(const RaftNode& node) {
-  std::string out = "node=" + std::to_string(node.Id()) + " role=" + RoleName(node.role()) +
+  std::string out = "node=" + std::to_string(node.Id()) + " role=" + RoleName(node.CurrentRole()) +
                     " term=" + std::to_string(node.Term()) +
                     " commit=" + std::to_string(node.CommitIndex()) + " log=[";
   const RaftLog& log = node.Log();
@@ -38,7 +38,7 @@ void Cluster::CheckInvariants() {
   // At most one leader per term. Two leaders in one term means two nodes each
   // believe they hold a quorum's votes, which is a broken voting rule.
   for (const auto& [id, node] : nodes_) {
-    if (node->role() != Role::kLeader) {
+    if (node->CurrentRole() != Role::kLeader) {
       continue;
     }
     const uint64_t term = node->Term();
@@ -56,7 +56,7 @@ void Cluster::CheckInvariants() {
   // appends. Violating this means a leader discarded something it may already
   // have told a client was committed.
   for (const auto& [id, node] : nodes_) {
-    if (node->role() != Role::kLeader) {
+    if (node->CurrentRole() != Role::kLeader) {
       last_leader_log_.erase(id);
       continue;
     }
@@ -121,7 +121,7 @@ void Cluster::CheckInvariants() {
   // A leader holds every entry committed in any earlier term. This is what
   // makes an election safe to serve reads and writes from.
   for (const auto& [id, node] : nodes_) {
-    if (node->role() != Role::kLeader) {
+    if (node->CurrentRole() != Role::kLeader) {
       continue;
     }
     for (const auto& [other_id, other] : nodes_) {

@@ -56,7 +56,8 @@ TEST(RaftClusterTest, NoLeaderEmergesWithoutAQuorum) {
   for (uint64_t id : {4UL, 5UL}) {
     RaftNode* node = cluster.Node(id);
     ASSERT_NE(node, nullptr);
-    EXPECT_NE(node->role(), Role::kLeader) << "node " << id << " became leader without a quorum";
+    EXPECT_NE(node->CurrentRole(), Role::kLeader)
+        << "node " << id << " became leader without a quorum";
   }
 }
 
@@ -218,7 +219,7 @@ TEST(RaftClusterTest, AMinorityPartitionCannotElectALeader) {
   }
 
   for (uint64_t id : {1UL, 2UL}) {
-    EXPECT_NE(cluster.Node(id)->role(), Role::kLeader)
+    EXPECT_NE(cluster.Node(id)->CurrentRole(), Role::kLeader)
         << "node " << id << " led a minority partition";
   }
 }
@@ -343,6 +344,12 @@ TEST(RaftClusterTest, RandomizedFaultsPreserveEveryInvariant) {
   //   RAFTKV_SEED=5 ./build/test/raft_cluster_test --gtest_filter='*Randomized*'
   uint64_t first_seed = 1;
   uint64_t last_seed = 2000;
+  // getenv is flagged mt-unsafe because another thread could call setenv
+  // concurrently. Nothing here does: this runs once at the top of a test body,
+  // and the Raft core under test is single-threaded by construction -- that is
+  // the whole point of the Ready/Advance design. Suppressed narrowly rather
+  // than disabling the check for the test tree, where it is still wanted.
+  // NOLINTNEXTLINE(concurrency-mt-unsafe)
   if (const char* pinned = std::getenv("RAFTKV_SEED"); pinned != nullptr) {
     first_seed = last_seed = std::strtoull(pinned, nullptr, 10);
     // Replaying a single seed is a debugging session; turn the protocol trace

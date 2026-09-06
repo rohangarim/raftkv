@@ -242,10 +242,13 @@ void RaftNode::Step(const proto::Message& m) {
     case proto::MSG_HEARTBEAT:
       HandleHeartbeat(m);
       break;
+    // A heartbeat response confirms the follower is alive and at our term,
+    // which Step() has already recorded for CheckQuorum above. Replication
+    // progress is driven by AppendEntries responses, so there is nothing
+    // further to do. Unknown types share this no-op deliberately: a peer
+    // running a newer build may send a message this one does not know, and
+    // ignoring it is safer than treating it as fatal.
     case proto::MSG_HEARTBEAT_RESP:
-      // A heartbeat response confirms the follower is alive and at our term.
-      // Replication progress is driven by AppendEntries responses.
-      break;
     default:
       break;
   }

@@ -161,7 +161,7 @@ class Cluster {
     uint64_t found = 0;
     size_t count = 0;
     for (const auto& [id, node] : nodes_) {
-      if (node->role() == Role::kLeader) {
+      if (node->CurrentRole() == Role::kLeader) {
         found = id;
         ++count;
       }
@@ -172,7 +172,7 @@ class Cluster {
   std::vector<uint64_t> Leaders() const {
     std::vector<uint64_t> out;
     for (const auto& [id, node] : nodes_) {
-      if (node->role() == Role::kLeader) {
+      if (node->CurrentRole() == Role::kLeader) {
         out.push_back(id);
       }
     }
