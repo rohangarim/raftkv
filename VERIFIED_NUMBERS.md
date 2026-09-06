@@ -294,6 +294,22 @@ benchmarked.
 
 ---
 
+## Remediation after the audit
+
+The audit found three defects in raftkv. All three are fixed; this section
+records what changed rather than editing the findings above, so the original
+state stays visible.
+
+| Finding | State at audit | Now |
+|---|---|---|
+| clang-tidy failing, 3 errors | `bugprone-branch-clone`, a naming violation, and `concurrency-mt-unsafe` | **Clean, 26 files.** The branch clone was a genuine duplicate arm; `role()` was renamed `CurrentRole()`; the `getenv` call carries a narrow, justified `NOLINTNEXTLINE` rather than the check being disabled tree-wide |
+| TSan reported a failure | The 2000-seed soak takes 132 s and overran ctest's 120 s default | **141/141 under all three sanitizers.** `raftkv_test()` now takes a per-binary `TIMEOUT`; the soak gets 600 s, sized for the sanitizer rather than the fast path |
+| README claimed "green under ASan, UBSan, and TSan" on an unfinished run | False when written | Now true, and the README links to this document |
+
+Re-verified after the fixes: `ctest --preset default` 162/162 (the suite grew
+with the new storage layer), `scripts/ci.sh asan ubsan tsan` 141/141 each,
+`scripts/tidy.sh` clean.
+
 ## Superseded and third-party files in `results/`
 
 `results/10_ycsb_default_3runs.txt` and `results/11_ycsb_threads_4_8.txt` are

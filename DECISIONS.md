@@ -738,3 +738,117 @@ Invariant failures also dump both nodes' full logs, because "these two byte
 strings differ" costs an hour of re-deriving state the harness already had.
 
 **Cost:** 2000 seeds is roughly 13 seconds of the test suite. Worth it.
+
+---
+
+## D-0031: The Raft log fsyncs per Ready batch, not per entry
+
+**Phase:** 3. Deliberately the opposite of D-0014, and the contrast is the point.
+
+**What:** `RaftLogStore::Append` buffers; `Sync()` makes the whole batch
+durable. The Ready/Advance contract already forbids sending any message before
+its batch is persisted, so one fsync covers every entry that accumulated in
+that round.
+
+**Why:** The requirement is to avoid an fsync per entry while never
+acknowledging an entry that could be lost. Batching satisfies both because the
+batch boundary and the acknowledgement boundary are the same boundary. Under
+load the batch grows and the fsync amortises; when idle it degenerates to one
+fsync for one entry, which is correct and costs nothing because nothing else is
+happening.
+
+The rule, stated so it can be checked: **`Sync()` must return before any
+message from that Ready is sent, and before the leader counts its own entries
+toward `match_index`.**
+
+**Contrast with D-0014, which must not be confused with this.** The LSM state
+machine may lag durability, because anything it loses is replayable from the
+Raft log. The Raft log has nothing behind it: an entry acknowledged from here
+and then lost is a lost committed write. Same system, opposite durability
+rules, and they must never share a file.
+
+**Alternative:** fsync per entry. Simpler to reason about, and it makes write
+throughput a function of fsync latency — on this hardware, `F_FULLFSYNC` at
+roughly 1 ms, so about 1000 entries/sec.
+
+**Cost:** Correctness now depends on call ordering rather than on a local
+guarantee. A driver that sends before syncing would be fast and wrong, and no
+unit test of `RaftLogStore` alone can catch it.
+
+---
+
+## D-0032: Hard state is written whole and renamed, never updated in place
+
+**Phase:** 3
+
+**What:** `HardStateStore::Save` writes a temp file, fsyncs its contents,
+renames it over the real one, then fsyncs the directory.
+
+**Why:** `currentTerm` and `votedFor` must be durable before any RPC is
+answered, and an in-place update of an 8-byte field can in principle tear. The
+recovery story for "the term is half of two numbers" is that there is no
+recovery story — the node cannot tell which half is real, and a wrong term
+breaks Election Safety. Rename is atomic, so the file is either the old state
+or the new one.
+
+Both fsyncs are load-bearing. Without the first, the rename can publish a file
+whose contents never reached disk. Without the second, the rename itself is not
+durable and the directory entry can revert.
+
+An empty `HARDSTATE` is treated as "no state", not corruption: that is what a
+crash between create and write leaves, and it is a lost update rather than
+damage.
+
+**Alternative:** A small journal of term/vote records. More writes, no better
+guarantee for a value this size.
+
+**Cost:** Two fsyncs per hard-state change. Hard state changes on election and
+on term change, not per entry, so this is off the hot path.
+
+---
+
+## D-0033: A damaged tail is repaired; damage anywhere else is fatal
+
+**Phase:** 3
+
+**What:** On recovery the log truncates a damaged record only in the **final**
+segment. Damage in any earlier segment returns `kCorruption`.
+
+**Why:** A partial record at the end of the last segment is the expected result
+of a crash mid-append. Everything before it is intact, and the truncated entry
+was never acknowledged, so dropping it loses nothing that was promised.
+
+Damage in the middle is a different thing entirely. Truncating there would
+discard every entry in the segments that follow — silently, and those entries
+may well be committed. A store that "recovers" by deleting committed data is
+worse than one that refuses to start, because the operator never finds out.
+
+**Cost:** A single corrupted byte in an old segment takes the node down until
+someone intervenes. That is the correct failure mode: the cluster has other
+replicas, and this node's data cannot be trusted.
+
+---
+
+## D-0034: TruncateSuffix rewrites the log rather than seeking
+
+**Phase:** 3
+
+**What:** Dropping a divergent suffix reads every surviving entry, deletes all
+segments, and rewrites.
+
+**Why:** Slower than truncating at a byte offset, and chosen anyway. A follower
+repairing a divergent suffix is rare — it happens after a leader change with
+conflicting entries, not on the steady-state path. A rewrite cannot leave a
+half-updated state across a segment boundary, where an in-place truncation has
+to delete some segments, truncate one, and update the index consistently; a
+crash midway through that leaves a log whose header disagrees with its
+contents.
+
+The truncation is fsynced before returning, because a truncation that is not
+durable resurrects the discarded entries on restart. That is precisely the bug
+the Phase 2 harness caught in the in-memory path (D-0029), and it would be far
+harder to spot here.
+
+**Alternative:** In-place truncation with a durable index update.
+
+**Cost:** O(log size) work on a rare path. Revisit if a profile ever shows it.
