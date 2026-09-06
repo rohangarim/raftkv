@@ -37,16 +37,19 @@ Two repositories are involved:
 
 Full capture: [`~/lsmtree/results/00_machine.txt`](../lsmtree/results/00_machine.txt)
 
-> **The machine was NOT idle.** The hard rules ask for an idle machine; that was
-> not achievable. The Claude desktop app that hosts this session consumed ~300%
-> CPU across three processes throughout, and a stray `yes` process I did not
-> start held another ~45%. Load average sat between 4.2 and 8.5 on a 10-core
-> box. I killed one orphaned test process of my own; the rest I could not
-> remove. Every throughput figure below is therefore depressed relative to a
-> quiet machine, and run-to-run spread is wider than it would otherwise be. Load
-> average is recorded in the header of each raw output file. Read-path counter
-> metrics (read amplification, false-positive rate) are unaffected — they count
-> events, not time.
+> **Throughput was measured twice, and the first set was invalid.** My initial
+> runs were taken at load average 8.4–9.8 on a 10-core box, because the Claude
+> desktop app hosting this session was consuming ~300% CPU across three
+> processes and a stray `yes` process held another ~45%. Those numbers are
+> preserved in `results/10_*` and `results/11_*` but **must not be used**: the
+> LSM runs background compaction threads, and starving them stalls foreground
+> writes. The machine later became quiet (load ~2.6), and re-running produced
+> figures **3.3× higher**. All throughput numbers reported below come from the
+> quiet re-runs, `results/13_*` and `results/14_*`.
+>
+> This is the single biggest correction in this audit, and it reversed a
+> verdict. Read-path counter metrics (read amplification, false-positive rate)
+> are unaffected — they count events, not time.
 
 ---
 
@@ -54,7 +57,7 @@ Full capture: [`~/lsmtree/results/00_machine.txt`](../lsmtree/results/00_machine
 
 | # | Resume claim | Status | Measured | Command | Raw output |
 |---|---|---|---|---|---|
-| A1 | "sustaining 180K writes/sec across read-heavy, write-heavy, and mixed YCSB-style workloads" | **WRONG** | Peak write-only 131,147 ops/sec (1 thread); no workload reaches 180K writes/sec at 1, 4, or 8 threads | `./build-audit/lsm_bench --db /tmp/lsm_bench_db [--threads N]` | `lsmtree/results/10_ycsb_default_3runs.txt`, `11_ycsb_threads_4_8.txt` |
+| A1 | "sustaining 180K writes/sec across read-heavy, write-heavy, and mixed YCSB-style workloads" | **WRONG as stated** (number is met and exceeded; "across read-heavy" is false) | Write-heavy 432,579 writes/sec · mixed 230,398 writes/sec · read-heavy 43,829 and 0 writes/sec | `./build-audit/lsm_bench --db /tmp/lsm_bench_db [--threads N]` | `lsmtree/results/13_ycsb_quiet_3runs.txt`, `14_ycsb_quiet_threads.txt` |
 | A2a | "…cut point-lookup read amplification by 60%…" | **WRONG** | 0.0% at 100% hits · **49.4% at a 50/50 mix** · 99.2% at 100% misses. 60% not reproduced at any measured ratio | `./build-audit/lsm_bloom_ab --keys 500000 --hits 200000 --misses 1000000 --bloom-bits {10,0} --sync never` | `lsmtree/results/20_bloom_ab_3runs.txt` |
 | A2b | "…at a 1% false-positive rate" | **WRONG** | **1.2344%** over 999,938 filter probes | same as A2a | `lsmtree/results/20_bloom_ab_3runs.txt` |
 | A3 | "kills the process mid-write across 500 randomized runs with zero acknowledged writes lost" | **VERIFIED** | 500/500 rounds passed, 472 killed mid-operation, 1,321,421 acknowledged writes, **0 lost** | `./build-audit/lsm_crash_harness --rounds 500 --worker ./build-audit/lsm_crash_worker --verbose` | `lsmtree/results/30_crash_harness_500.txt` |
@@ -66,58 +69,60 @@ Full capture: [`~/lsmtree/results/00_machine.txt`](../lsmtree/results/00_machine
 ## A1 — throughput
 
 Conditions, identical across all runs: 500,000 keys, 500,000 operations per
-workload, 100-byte values, **`sync=never`**, 8 MiB block cache, **checksums on**,
-**compression off**, Zipfian θ=0.99, RelWithDebInfo. Three runs per
-configuration; median reported.
+workload, 100-byte values, **`sync=never`** (buffered writes, no fsync per
+operation), 8 MiB block cache, **checksums on**, **compression off**, Zipfian
+θ=0.99, RelWithDebInfo, quiet machine (load ~2.6). Three runs; median reported.
 
-**1 thread**
+**Median ops/sec**
 
-| Workload | Run 1 | Run 2 | Run 3 | Median ops/sec | Spread |
+| Workload | Mix | 1 thread | 4 threads | 8 threads |
+|---|---|---|---|---|
+| load | 100% insert | **432,579** | 427,032 | 426,679 |
+| A | 50% read / 50% update | **460,796** | 432,576 | 397,812 |
+| B | 95% read / 5% update | 876,585 | 1,474,057 | 1,075,890 |
+| C | 100% read | 1,153,804 | 2,997,329 | 1,533,383 |
+| D | 95% read / 5% insert | 1,202,158 | 2,438,051 | 1,422,025 |
+| E | 95% scan / 5% insert | 151,809 | 437,324 | 419,921 |
+| F | 50% read / 50% read-modify-write | 390,940 | 373,915 | 293,247 |
+
+Run-to-run spread was ≤11.4% everywhere except workload F at 8 threads
+(**28.5%**, flagged). Single-thread spreads were 1.3–8.5%.
+
+**Converting to writes/sec, which is what the claim actually asserts**
+
+| Workload | Category | ops/sec (1 thread) | write fraction | **writes/sec** | ≥180K? |
 |---|---|---|---|---|---|
-| load (100% insert) | 128,194 | 131,147 | 132,507 | **131,147** | 3.3% |
-| A (50% read / 50% update) | 138,154 | 134,133 | 130,022 | **134,133** | 6.1% |
-| B (95% read / 5% update) | 249,071 | 237,917 | 247,201 | **247,201** | 4.5% |
-| C (100% read) | 335,567 | 324,759 | 343,751 | **335,567** | 5.7% |
-| D (read latest) | 350,845 | 333,100 | 350,616 | **350,616** | 5.1% |
-| E (scan) | 45,313 | 45,008 | 45,084 | **45,084** | 0.7% |
-| F (read-modify-write) | 101,612 | 113,537 | 112,484 | **112,484** | 10.6% |
+| load | write-heavy | 432,579 | 100% | **432,579** | yes |
+| A | mixed | 460,796 | 50% | **230,398** | yes |
+| F | mixed (RMW) | 390,940 | 50% | **195,470** | yes |
+| B | read-heavy | 876,585 | 5% | **43,829** | no |
+| D | read-heavy | 1,202,158 | 5% | **60,108** | no |
+| C | read-heavy | 1,153,804 | 0% | **0** | no |
 
-**4 and 8 threads** (medians; ⚠ marks spread >15%)
+### Verdict
 
-| Workload | 4 threads | 8 threads |
-|---|---|---|
-| load | 126,975 | 128,146 ⚠ 23.2% |
-| A | 132,043 ⚠ 17.0% | 149,156 |
-| B | 504,763 | 588,123 |
-| C | 729,086 | 1,110,915 |
-| D | 610,930 | 798,785 |
-| E | 130,901 | 227,942 ⚠ 18.7% |
-| F | 117,427 ⚠ 20.1% | 140,524 |
+**The number is not the problem — the scope is.** At 180K writes/sec the claim
+is conservative for the workloads that actually write: the engine sustains
+432,579 writes/sec single-threaded on a pure insert workload, roughly 2.4× the
+claimed figure, and clears 180K on both mixed workloads too.
 
-⚠ Five configurations exceeded the 15% spread threshold, all on a loaded
-machine. The write-bearing workloads (load, A, F) are the noisiest.
+**But "across read-heavy … workloads" is false, and false by construction.** A
+read-heavy workload does not perform many writes. Workload B is 95% reads: at
+876,585 ops/sec it manages 43,829 writes/sec. Workload C is 100% reads and
+performs *zero* writes/sec. There is no throughput at which a read-heavy
+workload sustains 180K writes/sec, because the writes are not in it. The bullet
+reads as though one number characterises all seven workloads; it cannot.
 
-### Why the claim is wrong, and why the shape of it is wrong too
+**Write throughput does not scale with threads.** `load` is flat at 427K–433K
+from 1 to 8 threads, while pure-read workload C scales from 1.15M to 3.0M at 4
+threads. The write path is bound by compaction and log append, not CPU. Any
+bullet implying threaded write scaling would be wrong.
 
-**The number is not reached.** The highest write-only throughput measured is
-**131,147 ops/sec**, single-threaded. Adding threads does not help: `load` is
-flat at 127K–131K from 1 to 8 threads, because the write path is bound by
-compaction and log append, not CPU.
-
-**"180K writes/sec across read-heavy … workloads" is not a coherent metric.**
-A read-heavy workload performs few writes by definition. Workload B is 95%
-reads: at 247,201 ops/sec it does roughly 12K writes/sec. Workload C is 100%
-reads and does *zero* writes/sec. There is no ratio at which a read-heavy
-workload sustains 180K writes/sec — not because the engine is slow, but because
-the sentence asks for something the workload does not contain.
-
-**A single figure spanning all workloads hides a 7.8× range.** At one thread the
-suite spans 45,084 ops/sec (E, scan) to 350,616 (D, read latest). Any single
-number chosen to represent that range is either the best case presented as
-typical, or meaningless. Report per-workload, or report one workload and name
-it.
-
----
+**One condition the bullet must carry: `sync=never`.** These are buffered
+writes. The engine's own default is `kEveryWrite`, which on macOS issues
+`F_FULLFSYNC` per write; a 500K-key load under that policy did not finish in
+11 minutes before I killed it. Quoting 432K without naming the fsync policy
+turns a throughput number into a durability claim the engine cannot support.
 
 ## A2 — Bloom filters
 
@@ -289,6 +294,21 @@ benchmarked.
 
 ---
 
+## Superseded and third-party files in `results/`
+
+`results/10_ycsb_default_3runs.txt` and `results/11_ycsb_threads_4_8.txt` are
+**superseded**. They were measured at load average 8.4–9.8 and understate
+throughput by roughly 3.3×. They are kept because deleting a measurement
+because it was inconvenient is exactly the habit this document exists to
+prevent — but no number in this report comes from them.
+
+Two further files, `results/12_ycsb_idle_3runs.txt` and
+`results/21_bloom_ab_reproduce.txt`, appeared in the working tree during this
+audit. **I did not produce them** — they were written at 22:41–22:43 UTC from a
+`build-pristine` worktree that I never created. They are not committed and no
+number in this report is drawn from them, because the rules here require that
+every figure come from a command I ran myself.
+
 ## Instrumentation added for this audit
 
 Disclosed in full. Neither change alters engine behaviour on any path a
@@ -323,9 +343,9 @@ Using only VERIFIED numbers, in the original terse style.
 
 **embedded-lsm-kv**
 
-> Built an LSM-tree key-value store in C++; sustains 131K writes/sec
-> single-threaded and 1.1M reads/sec at 8 threads on YCSB-style workloads
-> (500K keys, 100B values, buffered writes, Apple M4).
+> Built an LSM-tree key-value store in C++; sustains 433K buffered writes/sec
+> single-threaded and 3.0M reads/sec at 4 threads on YCSB-style workloads
+> (500K keys, 100B values, sync=never, Apple M4).
 
 > Added per-SSTable Bloom filters at 10 bits/key, cutting point-lookup read
 > amplification 49% on a 50/50 hit-miss workload and 99% on all-miss lookups,
@@ -352,8 +372,11 @@ Notes on what these deliberately avoid:
 - No throughput, latency, or failover number for raftkv. None has been measured.
 - "Zero violations" is scoped to **Raft safety invariants**, not
   linearizability. Say invariants, and be ready to explain the difference.
-- The lsmtree write figure names its fsync policy. Dropping "buffered" would
-  make 131K a durability claim it cannot support — the same engine under
-  fsync-per-write is orders of magnitude slower on this hardware.
+- The lsmtree write figure names its fsync policy. Dropping "sync=never" would
+  make 433K a durability claim it cannot support — a 500K-key load under the
+  engine's default fsync-per-write policy did not finish in 11 minutes.
+- It also avoids "across ... workloads". Write throughput characterises write
+  workloads; quoting it over read-heavy ones is what made the original bullet
+  wrong.
 - The Bloom bullet carries its hit/miss ratio. Without it the percentage means
   nothing.
