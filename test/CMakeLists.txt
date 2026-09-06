@@ -59,3 +59,7 @@ raftkv_test(raft_cluster_test
   LIBS raftkv_raft
   TIMEOUT 600)
 target_include_directories(raft_cluster_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+raftkv_test(raft_storage_test
+  SOURCES raft_storage_test.cc
+  LIBS raftkv_storage)
