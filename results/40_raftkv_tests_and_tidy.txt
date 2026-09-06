@@ -1,0 +1,16 @@
+# raftkv test suite + clang-tidy status
+# recorded: 2026-09-05T22:36:45Z
+# git: 0fb08b6 branch main, tree 1 files dirty
+
+## ctest --preset default
+141/141 Test #141: RaftClusterTest.RandomizedFaultsPreserveEveryInvariant ...............   Passed    7.26 sec
+
+100% tests passed out of 141
+
+Total Test time (real) =  10.81 sec
+
+## scripts/tidy.sh
+/Users/rohangarimella/raft/src/raft/raft_node.cc:245:5: error: switch has 2 consecutive identical branches [bugprone-branch-clone,-warnings-as-errors]
+/Users/rohangarimella/raft/src/raft/raft_node.h:103:8: error: invalid case style for function 'role' [readability-identifier-naming,-warnings-as-errors]
+/Users/rohangarimella/raft/test/raft_cluster_test.cc:346:28: error: function is not thread safe [concurrency-mt-unsafe,-warnings-as-errors]
+# tidy exit=0

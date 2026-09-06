@@ -1,0 +1,24 @@
+# raftkv sanitizer status, per sanitizer
+# recorded: 2026-09-06T02:38:24Z
+# git: 0fb08b6
+
+## Summary
+asan  : 141/141 PASS   (ctest --preset asan)
+ubsan : 141/141 PASS   (ctest --preset ubsan)
+tsan  : 140/141 via ctest -- RandomizedFaultsPreserveEveryInvariant TIMES OUT
+        at ctest's 120s limit. Run directly with no timeout it PASSES in
+        132.217 s with ZERO ThreadSanitizer diagnostics. This is a test
+        configuration problem (DISCOVERY/TIMEOUT too low for a 2000-seed
+        soak under TSan instrumentation), not a data race.
+
+## Raw: tsan soak run directly
+$ TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
+  ./build/tsan/test/raft_cluster_test --gtest_filter='*Randomized*'
+[       OK ] RaftClusterTest.RandomizedFaultsPreserveEveryInvariant (132217 ms)
+[  PASSED  ] 1 test.
+
+## Note on an earlier flaky observation
+A first ci.sh sweep reported 2 failures under each of ubsan and tsan.
+Re-running ubsan alone gave 141/141. The soak test is the only consistent
+failure and it is a timeout. Treat single sweeps of this suite as noisy
+until the soak's ctest TIMEOUT is raised above the TSan runtime.
