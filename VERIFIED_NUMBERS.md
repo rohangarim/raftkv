@@ -302,12 +302,29 @@ throughput by roughly 3.3×. They are kept because deleting a measurement
 because it was inconvenient is exactly the habit this document exists to
 prevent — but no number in this report comes from them.
 
-Two further files, `results/12_ycsb_idle_3runs.txt` and
-`results/21_bloom_ab_reproduce.txt`, appeared in the working tree during this
-audit. **I did not produce them** — they were written at 22:41–22:43 UTC from a
-`build-pristine` worktree that I never created. They are not committed and no
-number in this report is drawn from them, because the rules here require that
-every figure come from a command I ran myself.
+Several files appeared in the working tree during this audit that I did not
+produce — `results/12_ycsb_idle_3runs.txt`, `results/21_bloom_ab_reproduce.txt`,
+and `results/90_instrumentation.patch`. They came from a second Claude agent
+working in this repository concurrently, confirmed by the repo owner. They are
+left uncommitted and **no figure in this report is drawn from them**.
+
+One observation from them is worth recording, with its limits stated. That
+agent's bloom reproduction, run from a **pristine `ff585d5` worktree** with only
+the bloom instrumentation applied, reports counters identical to mine to six
+significant figures: read amplification 0.854475 / 0.006952 / 0.432216 across
+the three lookup mixes, 999,938 filter probes, 12,343 pass-throughs, and a
+1.234377% false-positive rate.
+
+What that does establish: the A2 numbers **do not depend on the uncommitted
+changes** in `block.h`, `memtable.h`, `skiplist.h`, and `block.cpp`, since a
+tree without them produces the same counters. That removes the reproducibility
+caveat for A2 specifically.
+
+What it does **not** establish: independent validation of the methodology. The
+run used the same tool and the same seeded key sequence, so identical output is
+the expected result of determinism, not agreement between two separate
+measurements. A genuine cross-check would require a differently-constructed
+experiment.
 
 ## Instrumentation added for this audit
 
