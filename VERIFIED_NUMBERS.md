@@ -413,3 +413,93 @@ Notes on what these deliberately avoid:
   wrong.
 - The Bloom bullet carries its hit/miss ratio. Without it the percentage means
   nothing.
+
+---
+
+# raftkv re-audit — 2026-09-11
+
+No numeric performance claims exist in the current README — it correctly
+states "no performance numbers" throughout. This audit therefore checks
+infrastructure, not numbers: for each piece B1/B2 need, does it exist, is it
+committed, and does it actually run.
+
+**State at audit time:** HEAD `2a96006`, plus an UNCOMMITTED working tree
+containing the Phase 3 gRPC transport (`src/server/`, `src/transport/raft_service.*`,
+a real node binary, a real 3-node gRPC integration test, and a real-subprocess
+`SIGKILL` test script). Both states are reported below since "what's real right
+now" means the code on disk, not just what's pushed.
+
+| Component B1/B2 need | Exists? | Committed? | Verified working this session |
+|---|---|---|---|
+| Deterministic Raft core | Yes | Yes | 141/141 tests, 2000 randomized fault-injection seeds, 0 invariant violations |
+| Durable Raft log + hard state | Yes | Yes | 21/21 tests including torn-write and mid-segment-corruption cases |
+| Real gRPC transport (RequestVote/AppendEntries) | Yes | **No — working tree only** | 4/4 tests, real 3-node cluster, real sockets, real disk |
+| Real node process (standalone binary) | Yes | **No — working tree only** | `raftkv_node` builds and runs; 3 real OS processes elect a leader, survive a real `SIGKILL`, and rejoin |
+| Client library (routing, retry, dedup) | **No** | — | — |
+| Load generator w/ latency histograms | **No** — `bench/` is empty | — | — |
+| Failover timer | **No** | — | — |
+| Nemesis harness (partition/kill injection against a LIVE cluster) | **No** — `chaos/` is empty | — | — |
+| Linearizability checker (Porcupine or hand-rolled) | **No** | — | — |
+
+## B1 — "Raised write throughput from 2.1K to 14K ops/sec at p99 under 25ms and 1.2s leader failover"
+
+**NOT MEASURABLE.** Every piece this needs is absent: no client, no load
+generator, no latency histogram, no failover timer. There is also no "before"
+configuration to raise throughput FROM — Phase 9 (the batching/pipelining
+optimization work the "raised from" phrasing implies) hasn't started, and there
+is no committed `results/` benchmark of any kind for a live cluster. This
+number cannot be estimated from what exists; any figure here would be
+invented.
+
+**Shortest path to measurable:** commit the working tree's gRPC transport,
+build a minimal client (Phase 4 — leader cache, redirect-follow, retry), build
+`bench/` (load generator + HdrHistogram-style latency reporting, matching the
+existing `lsm_bench` pattern from the sibling project), then measure a real
+baseline before touching throughput at all.
+
+## B2 — "cleared 300 randomized fault-injection runs under network partitions and leader crashes with zero linearizability violations"
+
+**NOT MEASURABLE as stated**, but there is real, adjacent, verified work that
+should not be confused with it:
+
+- The **2000-seed in-process soak** (`test/raft_cluster_test.cc`,
+  `RandomizedFaultsPreserveEveryInvariant`) genuinely runs partitions, crashes,
+  restarts, and message loss/duplication/reorder against the deterministic
+  core, checking Election Safety, Leader Append-Only, Log Matching, Leader
+  Completeness, and State Machine Safety after every step. This is real,
+  committed, and passes. It is **not a linearizability check** — those five
+  invariants are Raft-internal safety properties, not the external
+  read/write-history property Porcupine or Wing & Gong check, and no history
+  recorder or checker exists to verify that property.
+- The **real-subprocess test added this session**
+  (`scripts/subprocess_cluster_test.sh`, uncommitted) runs 3 actual OS
+  processes, kills the actual leader process with actual `SIGKILL`, and
+  confirms real re-election and real rejoin-after-restart. Real, but it
+  exercises election safety under one specific fault (a single leader kill),
+  not 300 randomized runs, and proves nothing about linearizability since it
+  injects no writes (no client exists to inject them).
+
+Neither of these should be described as "linearizability violations: zero" —
+that phrase claims a specific checker ran against a specific history model,
+and none exists.
+
+**Shortest path to measurable:** build a history recorder (every client op
+logs invoke/ok/fail/info with wall-clock timestamps — `info`, never `fail`, for
+a timed-out request, since a timeout doesn't mean the write didn't land), a
+nemesis driver that randomly partitions/kills a LIVE gRPC cluster (not the
+in-memory simulation) with a seeded schedule, and a checker (Porcupine via an
+exported JSON history is the pragmatic choice over hand-rolling Wing & Gong).
+None of the three exist yet.
+
+## What IS real and verifiable right now
+
+- 166 tests total (up from 141 at the last raftkv audit), all passing —
+  `ctest --preset default`.
+- All three sanitizers green at 166/166 — `results/42_raftkv_sanitizers_phase3.txt`
+  (recorded before this session's uncommitted gRPC work; re-run after
+  committing to get a sanitizer result that covers it).
+- clang-tidy clean.
+- A real 3-node cluster, over real gRPC sockets, with real on-disk persistence,
+  that elects a leader, replicates a write to every follower's disk, survives a
+  process crash and rejoins with no lost committed data — all reproduced this
+  session, all in the uncommitted working tree.
