@@ -63,3 +63,8 @@ target_include_directories(raft_cluster_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 raftkv_test(raft_storage_test
   SOURCES raft_storage_test.cc
   LIBS raftkv_storage)
+
+raftkv_test(raft_grpc_cluster_test
+  SOURCES raft_grpc_cluster_test.cc
+  LIBS raftkv_server raftkv_transport raftkv_statemachine
+  TIMEOUT 120)
