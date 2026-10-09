@@ -52,6 +52,27 @@ message SnapshotMetadata {
   uint64 last_included_term = 2;
 }
 
+// Node-to-node consensus traffic.
+//
+// RequestVote and AppendEntries are unary and block until a reply is ready.
+// That works because the core produces exactly one reply message,
+// synchronously, in response to each: HandleRequestVote and HandleAppend both
+// call Send() unconditionally before returning. The RPC handler drains that
+// reply out of Ready and returns it directly as the call's result, which is
+// also where "persist before responding" is enforced -- the handler persists
+// hard state and entries BEFORE extracting the reply, so there is no way to
+// answer an RPC with unpersisted state.
+//
+// InstallSnapshot is declared for wire-format completeness but not yet
+// implemented: RaftNode::Step does not handle MSG_SNAPSHOT (Phase 5 work).
+// Calling it now returns UNIMPLEMENTED rather than a handler that pretends to
+// work.
+service Raft {
+  rpc RequestVote(Message) returns (Message);
+  rpc AppendEntries(Message) returns (Message);
+  rpc InstallSnapshot(Message) returns (Message);
+}
+
 message Message {
   MessageType type = 1;
   uint64 from = 2;
