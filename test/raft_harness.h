@@ -184,6 +184,43 @@ class Cluster {
 
   const std::vector<proto::Entry>& PersistedLog(uint64_t id) const { return persisted_.at(id).log; }
 
+  // ---- linearizable reads ------------------------------------------------
+
+  // Starts a ReadIndex on node `id`. Records the highest commit index known
+  // ANYWHERE in the cluster at the moment of the request, including nodes that
+  // are currently crashed (their durable commit index still counts). That is
+  // the floor for a linearizable read: every write acknowledged before the
+  // read began is at or below it, so a read point below it is a stale read.
+  // The check runs whenever a read state is emitted, so a violation fails at
+  // the step that produced it.
+  Status RequestRead(uint64_t id, const std::string& context) {
+    RaftNode* node = Node(id);
+    if (node == nullptr) {
+      return Status::Unavailable("node is down");
+    }
+    uint64_t floor = 0;
+    for (const auto& [nid, n] : nodes_) {
+      floor = std::max(floor, n->CommitIndex());
+    }
+    for (uint64_t crashed : crashed_) {
+      floor = std::max(floor, persisted_[crashed].hard_state.commit());
+    }
+    const Status s = node->ReadIndex(context);
+    if (s.IsOk()) {
+      read_floor_[context] = floor;
+    }
+    DrainReady();
+    return s;
+  }
+
+  bool WasServed(const std::string& context) const { return served_reads_.count(context) != 0; }
+  bool WasDropped(const std::string& context) const { return dropped_reads_.count(context) != 0; }
+  uint64_t ServedIndex(const std::string& context) const {
+    auto it = served_reads_.find(context);
+    return it == served_reads_.end() ? 0 : it->second;
+  }
+  size_t TotalServedReads() const { return served_reads_.size(); }
+
   // ---- fault injection ---------------------------------------------------
 
   void SetDropRate(double rate) { drop_rate_ = rate; }
@@ -252,6 +289,21 @@ class Cluster {
         log.push_back(entry);
       }
 
+      for (const auto& rs : ready.read_states) {
+        auto floor = read_floor_.find(rs.context);
+        if (floor != read_floor_.end()) {
+          ASSERT_GE(rs.index, floor->second)
+              << "stale read: node " << id << " served read '" << rs.context << "' at index "
+              << rs.index << " but index " << floor->second
+              << " was already committed somewhere in the cluster when it was requested [seed="
+              << seed_ << "]";
+        }
+        served_reads_[rs.context] = rs.index;
+      }
+      for (const auto& ctx : ready.dropped_reads) {
+        dropped_reads_.insert(ctx);
+      }
+
       for (const auto& applied : ready.committed_entries) {
         applied_[id][applied.index()] = applied.SerializeAsString();
       }
@@ -293,6 +345,10 @@ class Cluster {
   double duplicate_rate_ = 0.0;
   uint64_t max_delay_ = 0;
   uint64_t step_ = 0;
+
+  std::map<std::string, uint64_t> read_floor_;
+  std::map<std::string, uint64_t> served_reads_;
+  std::set<std::string> dropped_reads_;
 
   // Highest term observed with a leader, for Election Safety.
   std::map<uint64_t, uint64_t> leader_by_term_;

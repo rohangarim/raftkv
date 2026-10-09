@@ -68,3 +68,9 @@ raftkv_test(raft_grpc_cluster_test
   SOURCES raft_grpc_cluster_test.cc
   LIBS raftkv_server raftkv_transport raftkv_statemachine
   TIMEOUT 120)
+
+raftkv_test(raft_read_index_test
+  SOURCES raft_read_index_test.cc raft_harness.cc
+  LIBS raftkv_raft
+  TIMEOUT 600)
+target_include_directories(raft_read_index_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
