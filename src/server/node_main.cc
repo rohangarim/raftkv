@@ -29,6 +29,7 @@
 #include "common/log.h"
 #include "server/raft_driver.h"
 #include "statemachine/kv_state_machine.h"
+#include "transport/kv_service.h"
 #include "transport/raft_service.h"
 
 namespace {
@@ -112,11 +113,13 @@ int RunNode(int argc, char** argv) {
       sm_opened.TakeValue().release());
 
   auto service = std::make_shared<raftkv::transport::RaftGrpcService>();
+  auto kv_service = std::make_shared<raftkv::transport::KvGrpcService>();
 
   const std::string& self_address = args.peers.at(args.id);
   grpc::ServerBuilder builder;
   builder.AddListeningPort(self_address, grpc::InsecureServerCredentials());
   builder.RegisterService(service.get());
+  builder.RegisterService(kv_service.get());
   std::unique_ptr<grpc::Server> grpc_server = builder.BuildAndStart();
   if (grpc_server == nullptr) {
     std::fprintf(stderr, "failed to bind %s\n", self_address.c_str());
@@ -143,6 +146,7 @@ int RunNode(int argc, char** argv) {
   }
   std::shared_ptr<raftkv::server::RaftDriver> driver(driver_opened.TakeValue().release());
   service->SetDriver(driver);
+  kv_service->SetDriver(driver);
   driver->Start();
 
   LOG_INFO("node %llu listening on %s", static_cast<unsigned long long>(args.id),

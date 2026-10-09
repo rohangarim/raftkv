@@ -1,5 +1,6 @@
 add_library(raftkv_transport STATIC
   admin_service.cc
+  kv_service.cc
   raft_service.cc)
 
 target_include_directories(raftkv_transport PUBLIC ${CMAKE_SOURCE_DIR}/src)

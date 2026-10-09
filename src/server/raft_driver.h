@@ -25,11 +25,15 @@
 // whatever thread the gRPC client callback lands on.
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -81,6 +85,36 @@ class RaftDriver {
   // leader; the caller should redirect using LeaderHint().
   Status Propose(std::span<const std::byte> command);
 
+  // Proposes `command` and waits until it has been applied, returning the state
+  // machine's result for it.
+  //
+  //   kNotSupported -- not the leader; nothing was proposed. Redirect using
+  //                    LeaderHint().
+  //   kUnavailable  -- the entry was overwritten by a new leader's log, so it
+  //                    definitely did NOT commit.
+  //   kTimedOut     -- gave up waiting. The command MAY still commit later, so
+  //                    the outcome is unknown. A retry is safe only because
+  //                    commands carry (client_id, seq) and the state machine
+  //                    deduplicates.
+  Result<statemachine::ApplyResult> ProposeAndWait(std::span<const std::byte> command,
+                                                   std::chrono::milliseconds timeout);
+
+  // Linearizable read: obtain a read point from Raft (ReadIndex), wait until
+  // the state machine has applied through it, then read. Same error meanings
+  // as ProposeAndWait; a read has no "outcome unknown" problem, so kTimedOut
+  // here just means "try again".
+  Result<std::optional<std::string>> LinearizableGet(std::string_view key,
+                                                     std::chrono::milliseconds timeout);
+
+  // Address of a peer (or self), for building a redirect. Empty if unknown.
+  std::string AddressOf(uint64_t node_id) const;
+
+  // Highest Raft index the driver has fully processed, including entries that
+  // carry no command. This, not the state machine's own applied index, is what
+  // a read must wait on: the state machine skips no-ops, so its index can trail
+  // Raft's (DECISIONS.md D-0037).
+  uint64_t AppliedRaftIndex() const;
+
   // Inbound RPC handlers. Each is synchronous: the returned Message IS the
   // reply, already extracted from a Ready that has been fully persisted.
   Status HandleRequestVote(const proto::Message& request, proto::Message* response);
@@ -113,15 +147,23 @@ class RaftDriver {
   // happens INSIDE the lock but the (slower) apply and dispatch work can
   // happen outside it, without another thread observing a half-drained Ready.
   struct DrainedReady {
-    std::vector<proto::Entry> committed_entries;
     std::vector<proto::Message> outbound;
+    std::vector<raft::ReadState> read_states;
+    std::vector<std::string> dropped_reads;
   };
   Status DrainAndPersist(DrainedReady* out);
 
   void TickLoop();
   void DispatchOutbound(std::vector<proto::Message> outbound);
   void SendOne(const proto::Message& message);
-  void ApplyCommitted(const std::vector<proto::Entry>& entries);
+  // Everything that happens after a Ready has been persisted and the lock
+  // released: apply committed entries in order, resolve finished reads, send
+  // messages. Every call site goes through here so none can forget a step.
+  void Finish(DrainedReady drained);
+  void ApplyPending();
+  void ApplyBatch(const std::vector<proto::Entry>& entries);
+  void ResolveReads(const std::vector<raft::ReadState>& states,
+                    const std::vector<std::string>& dropped);
 
   proto::Raft::Stub* StubFor(uint64_t peer);
 
@@ -137,6 +179,40 @@ class RaftDriver {
   // (StubFor, called from detached dispatch threads).
   mutable std::mutex stubs_mutex_;
   std::unordered_map<uint64_t, std::unique_ptr<proto::Raft::Stub>> stubs_;
+
+  // Committed entries waiting to be applied, in commit order. Filled under
+  // mutex_ by DrainAndPersist; drained by ApplyPending under apply_mutex_.
+  //
+  // Why a queue and not "apply what you just drained": two threads can drain
+  // consecutive batches, say [5] and [6], then race to apply them after
+  // releasing mutex_. If 6 lands first the state machine records 6 as applied
+  // and then treats 5 as an already-applied duplicate -- silently never
+  // applying it. One queue plus one apply mutex makes the apply order equal
+  // the commit order by construction.
+  std::deque<proto::Entry> apply_queue_;
+  std::mutex apply_mutex_;
+
+  // Waiters. One mutex and one condition variable for all of them: contention
+  // here is negligible next to an fsync, and a single lock cannot be taken in
+  // two orders.
+  struct WriteWaiter {
+    uint64_t term = 0;
+    bool done = false;
+    Status status;
+    statemachine::ApplyResult result;
+  };
+  struct ReadWaiter {
+    bool done = false;
+    bool dropped = false;
+    uint64_t index = 0;
+  };
+  mutable std::mutex waiters_mutex_;
+  std::condition_variable waiters_cv_;
+  std::map<uint64_t, WriteWaiter> write_waiters_;  // keyed by log index
+  std::map<std::string, ReadWaiter> read_waiters_;
+  uint64_t applied_raft_index_ = 0;  // guarded by waiters_mutex_
+  std::atomic<uint64_t> read_counter_{0};
+  const std::string read_epoch_;
 
   std::thread ticker_;
   std::atomic<bool> running_{false};
