@@ -961,3 +961,203 @@ leader's id to differ from the killed leader's.
 macOS ships bash 3.2, so scripts here avoid `declare -A`, `mapfile`, and empty
 arrays under `set -u` (see the comments in `scripts/ci.sh` and
 `scripts/format.sh`).
+
+---
+
+## D-0040: ReadIndex acks are tied to the request, and the read point is fixed at request time
+
+**Phase:** 4
+
+**What:** `RaftNode::ReadIndex(ctx)` records the commit index, sends heartbeats
+carrying `ctx`, and serves the read only after a quorum of responses *echoing
+that ctx*. The read point is the commit index when the request started, not when
+the quorum answered. A leader that has not yet committed an entry from its own
+term refuses (`kUnavailable`); a follower refuses (`kNotSupported`).
+
+**Why each piece:**
+- *Request-specific ack.* A heartbeat response proves leadership only as of when
+  the matching heartbeat was sent. An ack from before the read arrived may
+  predate a newer leader's election.
+- *Own-term gate.* A fresh leader's commit index can lag what the previous
+  leader already told clients was committed. This is the Figure 8 hazard applied
+  to reads. A deleted gate produced a stale read in the randomized soak (seed 14).
+- *Read point at request time.* Everything committed before the read began is at
+  or below that index. Moving it later would be unnecessary, and moving it
+  earlier would be stale.
+
+**Mutation testing, and what it showed.** A read test that cannot fail proves
+nothing, so three deliberate bugs were introduced:
+
+| Mutant | Caught by |
+|---|---|
+| serve without waiting for a quorum | 4 tests, including the partition test and the soak (stale read at seed 42) |
+| drop the own-term-commit gate | the unit test and the soak (stale read at seed 14) |
+| accept any heartbeat ack, ignoring the context | **only the hand-written unit test** |
+
+The third result is a real limit, not a pass. The simulator drops in-flight
+messages the instant a partition forms, so "a stale ack from before the
+partition arrives after the read request" cannot occur there. The
+request-context property is therefore protected by one unit test
+(`NeedsAQuorumOfAcksForThisRequest`), not by the soak.
+
+**Single-node clusters** needed a fix found along the way: the term-start no-op
+never committed until a client write happened to trigger `MaybeAdvanceCommit`,
+so `ReadIndex` on an idle one-node cluster returned "unavailable" forever.
+
+**Not done:** lease reads (the spec's optional fast path). Every read costs a
+heartbeat round trip to a quorum.
+
+---
+
+## D-0041: A heartbeat response triggers a resend to a lagging follower
+
+**Phase:** 4. A liveness bug present since Phase 2.
+
+**What:** On `MSG_HEARTBEAT_RESP`, if the follower's `match_index` is below the
+leader's last index, the leader calls `SendAppend`.
+
+**Why it was missing:** AppendEntries were only sent on a client write or on a
+response. If an AppendEntries, or its response, was lost, the follower stayed
+behind until the *next proposal* happened to broadcast. When every writer is
+blocked waiting on that very commit, no further proposal comes, and replication
+stalls permanently.
+
+**How it surfaced:** the 8-writer gRPC test failed 13 of 20 runs with
+`TimedOut`, always in multiples of 8 (one stuck operation per writer thread).
+Over real gRPC the 75 ms RPC deadline expires during a follower's fsync and the
+response is dropped. The Phase 2 simulator never caught it because every
+scenario kept proposing.
+
+**Regression test:** `ALostAppendResponseIsRetransmittedWithoutNewWrites` drops
+exactly the `MSG_APPEND_RESP` messages, stops dropping them, proposes nothing
+more, and requires the entry to commit. It failed before the fix and passes
+after; it is deterministic.
+
+**Cost:** while a follower is merely slow, every heartbeat resends up to
+`max_entries_per_append` entries. Part of the same unbounded-in-flight problem
+as D-0038.
+
+---
+
+## D-0042: Committed entries are applied through one ordered queue
+
+**Phase:** 4. A race in the Phase 3 driver.
+
+**What:** `DrainAndPersist` pushes committed entries onto `apply_queue_` under
+`mutex_`; `ApplyPending` drains it under a separate `apply_mutex_`.
+
+**Why:** the original driver applied "what this thread just drained", after
+releasing the lock. Two threads can drain `[5]` and `[6]` and race to apply them.
+If 6 lands first, `KvStateMachine` records 6 as applied and then discards 5 as an
+already-applied duplicate. A committed, acknowledged write is silently lost.
+
+**Evidence the test can see it:** with the apply mutex removed, the concurrent
+writers test lost acknowledged writes on a follower in 3 of 12 runs
+(`node 2 lost writer3-39`). That is a ~25% detector, so "it passed once" meant
+nothing; the real code was run 25 times.
+
+---
+
+## D-0043: Reads wait on the driver's applied index; every consumed entry advances it
+
+**Phase:** 4. D-0037 coming due.
+
+**What:** the driver keeps `applied_raft_index_`, advanced for *every* entry it
+processes including no-ops. A `LinearizableGet` waits on that, not on the state
+machine's own index. Separately, `KvStateMachine` now writes the applied index
+even when a command is answered from the session cache or rejected
+(`AdvanceOnly`).
+
+**Why:** the state machine skips no-ops, so its index can trail Raft's. A read
+pinned at a no-op's index (an idle cluster: the term-start no-op is the only
+entry) would wait forever. `AReadOnAnIdleClusterDoesNotWaitForeverOnANoop` pins
+this. Deduplicated and rejected commands used to return without advancing the
+index, which would have made a snapshot at Raft's index refuse; that case is
+fixed here. No-ops still do not reach the state machine, so the Phase 5
+snapshot trigger must still snapshot at the state machine's own index.
+
+---
+
+## D-0044: A reused sequence number carrying a different command is an error
+
+**Phase:** 4. Found by my own test script, which first looked like data loss.
+
+**What:** each session entry stores an FNV-1a digest of the command bytes. A
+repeat of the cached `seq` is answered from the cache only if the digest
+matches; otherwise `InvalidArgument`.
+
+**What happened:** the real-process `SIGKILL` script reported 9 of 10
+acknowledged writes missing after the kill. They had never been applied. Each
+`raftkv_cli` invocation is a separate process, and I had given them all
+`--client-id smoke`, so every write was `(smoke, seq=1)`. The state machine
+correctly treated writes 2-10 as retries of write 1 and answered `OK` from its
+cache. With a distinct id per invocation, all 10 survive the kill, and the
+restarted node reads 11 log entries back from its own disk.
+
+**Why it still needed fixing:** the server acknowledged nine writes it never
+performed, with no error anywhere. A real client that restarts with the same id
+and a reset counter loses writes silently. A retry is byte-identical, so content
+can tell the two apart where the sequence number cannot.
+
+**Residual risk, stated plainly:** the check catches a reused number with a
+*different* command. It cannot catch a restarted client re-sending the *same*
+command under a reused number, which is indistinguishable from a retry. The
+safe usage is a fresh `client_id` per process lifetime (the client library's
+default) or a persisted counter. Sessions are also still never expired.
+
+**Cost:** 8 bytes per session; one extra applied-index write on dedup paths.
+
+---
+
+## D-0045: The client serialises its own operations and reports unknown outcomes honestly
+
+**Phase:** 4
+
+**What:** `KvClient` assigns `seq` once per logical operation and reuses it for
+every retry; takes one operation at a time per instance; follows `NOT_LEADER`
+hints without backoff; backs off with jitter otherwise; returns `kTimedOut` when
+the budget runs out.
+
+**Why:**
+- *One at a time.* A session keeps only the latest result, so two operations in
+  flight under one id could have the later one's sequence number overtake the
+  earlier one's retry. Parallelism means more clients.
+- *`kTimedOut` is not failure.* For a write it means "may have been applied".
+  Anything that records histories for a linearizability check must log it as
+  indeterminate, never as a failed operation, or the checker will reject correct
+  histories.
+- *Hints are free.* Being told where the leader is means nothing is wrong, so
+  waiting would only add latency.
+
+---
+
+## D-0046: Under heavy concurrent writes, heartbeats starve behind fsync (known, deferred)
+
+**Phase:** 4. Not fixed; recorded so Phase 9 starts from it.
+
+**What:** `DrainAndPersist` holds the driver's global lock across the fsync, and
+the ticker needs that lock. With 8 writers each forcing a sync, heartbeats arrive
+late enough that followers' election timers fire: one run lost leadership
+mid-test (`NotSupported: not the leader`). The concurrency tests raise
+`election_tick` to 60 to measure replication ordering rather than lock
+contention.
+
+**Fix, and it is Phase 9's headline:** group commit. One fsync should serve many
+proposals, and the sync should not hold the lock the ticker needs.
+
+---
+
+## OPEN: acknowledged write missing on a follower in ~2-4% of concurrent runs
+
+**Status:** unexplained. Not resolved by D-0041 or D-0042.
+
+`ConcurrentWritersLeaveEveryNodeWithIdenticalState` occasionally reports a
+follower missing an acknowledged write (`node 2 lost writer4-39`), always the
+last write of some writer, never with a WARN/ERROR in the log. The failing
+assertion now prints each node's commit, Raft-applied and state-machine-applied
+indexes and the writer's session entry, so the next occurrence is diagnosable.
+
+Ruled out by reading the code: out-of-order apply (the queue serialises it),
+lost wake-ups, session dedup (each writer uses sequential seqs under its own id).
+Not ruled out. This stays a known-flaky test rather than a skipped one, because
+the thing it flags may be real.
