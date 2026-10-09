@@ -10,6 +10,7 @@
 // asynchronous real kill; that gap is real and is recorded in the README
 // limitations rather than implied away.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -288,14 +289,29 @@ TEST_F(RaftGrpcClusterTest, ConcurrentWritersLeaveEveryNodeWithIdenticalState) {
   }
   ASSERT_EQ(failures.load(), 0) << "writes failed; the first was: " << first_failure;
 
-  const uint64_t target = driver.AppliedRaftIndex();
+  // Everything acknowledged is at or below the leader's commit index, so that is
+  // the bar every follower must reach before its state is compared. (This used
+  // to be the leader's applied index alone, which swept backwards while the
+  // driver re-delivered history, so a follower that was merely behind passed
+  // the gate and then looked like it had lost a write.)
+  const uint64_t target = std::max(driver.AppliedRaftIndex(), driver.CommitIndex());
+  const uint64_t leader_commit_at_target = driver.CommitIndex();
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(8000);
+  std::string timeline = "target=" + std::to_string(target) +
+                         " leader_commit=" + std::to_string(leader_commit_at_target);
   for (auto& [id, node] : nodes_) {
     while (node.driver->AppliedRaftIndex() < target &&
            std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    timeline += " | node" + std::to_string(id) +
+                " applied_when_wait_ended=" + std::to_string(node.driver->AppliedRaftIndex());
     ASSERT_GE(node.driver->AppliedRaftIndex(), target) << "node " << id << " never caught up";
+  }
+
+  for (auto& [id, node] : nodes_) {
+    EXPECT_EQ(node.driver->RedeliveredEntries(), 0U)
+        << "node " << id << " was handed committed entries more than once";
   }
 
   for (auto& [id, node] : nodes_) {
@@ -320,7 +336,8 @@ TEST_F(RaftGrpcClusterTest, ConcurrentWritersLeaveEveryNodeWithIdenticalState) {
                         ? "last_seq=" + std::to_string((*session)->last_seq()) +
                               " last_touch=" + std::to_string((*session)->last_touch_index())
                         : std::string("absent"));
-          ADD_FAILURE() << "node " << id << " lost " << client << "-" << i << state;
+          ADD_FAILURE() << "node " << id << " lost " << client << "-" << i << "\n  " << timeline
+                        << state;
           return;
         }
         ASSERT_TRUE(got->has_value()) << "node " << id << " lost " << client << "-" << i;
@@ -331,6 +348,30 @@ TEST_F(RaftGrpcClusterTest, ConcurrentWritersLeaveEveryNodeWithIdenticalState) {
 }
 
 // Acknowledged means durable on a quorum, so it survives the leader dying.
+// The core must hand each committed entry to the apply step exactly once. If it
+// re-emitted history on every drain, the state machine's index-based dedup would
+// hide it -- data would stay correct -- while each commit cost O(log length) and
+// the driver's applied index swept 1..N over and over. Counting redeliveries
+// makes that visible instead of absorbed.
+TEST_F(RaftGrpcClusterTest, EveryCommittedEntryReachesTheApplyStepExactlyOnce) {
+  StartCluster({1, 2, 3});
+  const uint64_t leader = WaitForLeader();
+  ASSERT_NE(leader, 0U);
+
+  for (int i = 0; i < 40; ++i) {
+    const std::string cmd = EncodePut("c1", static_cast<uint64_t>(i) + 1, "k" + std::to_string(i),
+                                      "v" + std::to_string(i));
+    ASSERT_TRUE(nodes_.at(leader).driver->ProposeAndWait(AsBytes(cmd), kWait).IsOk());
+  }
+  const uint64_t target = nodes_.at(leader).driver->AppliedRaftIndex();
+  WaitForAppliedAtLeast(target, kWait);
+
+  for (auto& [id, node] : nodes_) {
+    EXPECT_EQ(node.driver->RedeliveredEntries(), 0U)
+        << "node " << id << " was handed committed entries more than once";
+  }
+}
+
 TEST_F(RaftGrpcClusterTest, AcknowledgedWritesSurviveLosingTheLeader) {
   StartCluster({1, 2, 3});
   const uint64_t leader = WaitForLeader();

@@ -80,3 +80,8 @@ raftkv_test(kv_client_test
   LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
   TIMEOUT 300)
 target_include_directories(kv_client_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+raftkv_test(raft_driver_test
+  SOURCES raft_driver_test.cc
+  LIBS raftkv_server raftkv_statemachine
+  TIMEOUT 120)
