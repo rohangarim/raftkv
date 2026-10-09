@@ -8,17 +8,17 @@ whether any of it actually holds up.
 
 ## Where this is
 
-Phases 0 through 2 are done, and Phase 3 is mostly there: the build, the storage
-engine, the replicated state machine, the Raft consensus core, a durable Raft
-log, and a real transport. Three node processes talk gRPC over localhost, elect a
-leader, replicate writes to every follower's disk, and survive the leader being
-killed with a real `SIGKILL`. There is still no client library, so nothing
-outside a node can write to a running cluster yet, and **no performance
-numbers**, because nothing has been benchmarked. When numbers appear here, each
-will link to raw output in `results/` produced by a committed script. No file,
-no number.
+Phases 0 through 2 are done, and Phases 3 and 4 are mostly there. Three node
+processes talk gRPC over localhost, elect a leader, and replicate to every
+follower's disk. A client library finds the leader, follows redirects, retries
+safely, and does linearizable reads. Acknowledged writes survive the leader being
+killed with a real `SIGKILL`: `scripts/subprocess_cluster_test.sh` writes ten
+keys through the CLI, kills the leader process, and reads them all back.
+There are still **no performance numbers**, because nothing has been
+benchmarked. When numbers appear here, each will link to raw output in
+`results/` produced by a committed script. No file, no number.
 
-166 tests, green under ASan, UBSan, and TSan, with clang-tidy clean. The Raft
+197 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
 core additionally runs 2000 randomized fault-injection scenarios — partitions,
 crashes, restarts, dropped, delayed, reordered, and duplicated messages —
 checking all five Raft safety invariants after every single step.
@@ -125,13 +125,25 @@ results/        raw output, committed
 
 Worth saying plainly, since a system's limits are more useful than its claims:
 
-- **No client, so no external writes.** The tests that replicate data call
-  `Propose` inside the leader's own process. The real-process `SIGKILL` test
-  (`scripts/subprocess_cluster_test.sh`) proves election and rejoin survive a
-  kernel-delivered kill, but it cannot prove that acknowledged *writes* survive
-  one, because there is no way to send a write to a live process yet. That half
-  is covered by the in-process test, which destroys and rebuilds a node against
-  the same directory. It proves the persistence contract, not signal safety.
+- **The real-process test is one kill, not a campaign.** It writes ten keys,
+  kills one leader with `SIGKILL`, and checks they survive. No partitions (that
+  needs `tc`/`iptables` in Docker, Phase 7), no repeated runs, no linearizability
+  checking (Phase 10). It shows the durable path works under a real kill; it
+  does not show the system is correct under faults.
+- **An acknowledged write goes missing on a follower in a few percent of runs of
+  one stress test, and I have not found why.** See the `OPEN` entry in
+  `DECISIONS.md`. Three real bugs were found and fixed while chasing it; this
+  one is still open, and the test is kept (flaky) rather than skipped.
+- **Reads cost a quorum round trip each.** Linearizable reads use ReadIndex.
+  Lease reads, which skip the round trip at the price of assuming bounded clock
+  drift, are not implemented.
+- **A client that restarts must use a new `client_id`.** The cluster rejects a
+  reused sequence number carrying a different command, but cannot tell a
+  restarted client re-sending the *same* command from a retry. Sessions are also
+  never expired.
+- **Heavy concurrent writes starve heartbeats.** The driver holds its lock across
+  each fsync, so under load a leader can lose leadership. Group commit (Phase 9)
+  is the fix.
 - **`InstallSnapshot` is declared but returns `UNIMPLEMENTED`.** The core doesn't
   handle snapshot messages until Phase 5, so a node that falls behind the
   leader's compacted log cannot catch up yet.

@@ -1,0 +1,12 @@
+# raftkv sanitizer status, Phase 4 (ReadIndex, KV service, client)
+# recorded: 2026-10-09T20:47:19Z
+# git: 01aca18, clean tree
+# command: ./scripts/ci.sh asan ubsan tsan
+
+== preset: asan
+100% tests passed out of 197
+== preset: ubsan
+100% tests passed out of 197
+== preset: tsan
+100% tests passed out of 197
+# note: code-affecting commits are all at or before 01aca18; later commits are docs only
