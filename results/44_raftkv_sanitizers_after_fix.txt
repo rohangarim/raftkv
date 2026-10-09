@@ -1,0 +1,11 @@
+# raftkv sanitizer status after the redelivery fix (Phase 4)
+# recorded: 2026-10-09T21:42:52Z
+# git: 89dcf3f, clean tree
+# command: ./scripts/ci.sh asan ubsan tsan
+
+== preset: asan
+100% tests passed out of 200
+== preset: ubsan
+100% tests passed out of 200
+== preset: tsan
+100% tests passed out of 200
