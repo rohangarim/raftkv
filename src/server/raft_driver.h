@@ -115,6 +115,13 @@ class RaftDriver {
   // Raft's (DECISIONS.md D-0037).
   uint64_t AppliedRaftIndex() const;
 
+  // Number of committed entries handed to the apply step more than once, or out
+  // of order. The core must deliver each committed entry exactly once, in
+  // order; anything above zero means it is re-emitting history, which the state
+  // machine's index-based dedup would silently absorb while every commit costs
+  // O(log length). Exposed so tests can assert it stays zero.
+  uint64_t RedeliveredEntries() const;
+
   // Inbound RPC handlers. Each is synchronous: the returned Message IS the
   // reply, already extracted from a Ready that has been fully persisted.
   Status HandleRequestVote(const proto::Message& request, proto::Message* response);
@@ -212,6 +219,8 @@ class RaftDriver {
   std::map<std::string, ReadWaiter> read_waiters_;
   uint64_t applied_raft_index_ = 0;  // guarded by waiters_mutex_
   std::atomic<uint64_t> read_counter_{0};
+  uint64_t last_batch_index_ = 0;  // guarded by apply_mutex_
+  std::atomic<uint64_t> redelivered_{0};
   const std::string read_epoch_;
 
   std::thread ticker_;

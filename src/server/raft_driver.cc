@@ -123,8 +123,12 @@ Status RaftDriver::DrainAndPersist(DrainedReady* out) {
     RAFTKV_RETURN_IF_ERROR(log_->Sync());
   }
 
-  for (auto& entry : ready.committed_entries) {
-    apply_queue_.push_back(std::move(entry));
+  // Copy, do not move. Advance() below reads committed_entries.back().index() to
+  // learn how far the core has handed out. A moved-from protobuf reads as index
+  // 0, so moving here made the core believe it had applied nothing and re-emit
+  // the entire committed log on every drain.
+  for (const auto& entry : ready.committed_entries) {
+    apply_queue_.push_back(entry);
   }
   out->outbound = ready.messages;
   out->read_states = ready.read_states;
@@ -159,8 +163,26 @@ void RaftDriver::ApplyPending() {
   }
 }
 
+uint64_t RaftDriver::RedeliveredEntries() const {
+  return redelivered_.load(std::memory_order_relaxed);
+}
+
 void RaftDriver::ApplyBatch(const std::vector<proto::Entry>& entries) {
   for (const auto& entry : entries) {
+    // Committed entries must arrive strictly increasing. A repeat or a step
+    // backwards is a bug upstream; skipping it is safe (the state machine would
+    // dedup it anyway) but it must never be silent.
+    if (entry.index() <= last_batch_index_) {
+      if (redelivered_.fetch_add(1, std::memory_order_relaxed) == 0) {
+        LOG_ERROR("driver %llu: entry %llu delivered after %llu; the core is re-emitting history",
+                  static_cast<unsigned long long>(options_.raft_config.id),
+                  static_cast<unsigned long long>(entry.index()),
+                  static_cast<unsigned long long>(last_batch_index_));
+      }
+      continue;
+    }
+    last_batch_index_ = entry.index();
+
     // Entries without a command (no-op, config) are skipped by the state
     // machine, which is why the driver keeps its own applied index: see
     // AppliedRaftIndex().
