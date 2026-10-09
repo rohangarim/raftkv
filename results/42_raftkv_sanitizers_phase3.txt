@@ -1,0 +1,12 @@
+# raftkv sanitizer status, Phase 3 transport (gRPC driver, node binary)
+# recorded: 2026-10-09T20:00:45Z
+# git: 34779d9, clean tree
+# command: ./scripts/ci.sh asan ubsan tsan
+
+== preset: asan
+100% tests passed out of 166
+== preset: ubsan
+100% tests passed out of 166
+== preset: tsan
+100% tests passed out of 166
+# note: code-affecting commits are all at or before 34779d9; later commits are docs and a script comment
