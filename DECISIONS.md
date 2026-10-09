@@ -852,3 +852,110 @@ harder to spot here.
 **Alternative:** In-place truncation with a durable index update.
 
 **Cost:** O(log size) work on a rare path. Revisit if a profile ever shows it.
+
+---
+
+## D-0035: RequestVote and AppendEntries are blocking unary RPCs
+
+**Phase:** 3
+
+**What:** Each handler calls `Step(request)`, drains `Ready`, persists it, then
+returns the reply the core produced as the RPC's own response.
+
+**Why:** `HandleRequestVote` and `HandleAppend` each emit exactly one reply
+addressed to the sender, synchronously, so the reply can ride the RPC's return
+path. That makes "persist before responding" a property of the call structure:
+the handler cannot return before `DrainAndPersist` has run. The alternative, a
+fire-and-forget `Step` RPC with replies sent as separate messages (the etcd
+transport), needs the same ordering enforced separately at every send site.
+
+Heartbeats ride the `AppendEntries` RPC. The receiver dispatches on the
+message's own `type` field, not on which RPC method was called.
+
+**Cost:** A handler holds a gRPC thread for the duration of an fsync. Acceptable
+at this scale; revisit if Phase 9 shows handler threads as the bottleneck.
+
+---
+
+## D-0036: Commit and apply are different events, and the gap is deliberate
+
+**Phase:** 3. Found by a flaky test, not by design.
+
+**What:** `RaftNode::CommitIndex()` advances inside `Step()`, under the driver's
+lock. `ApplyCommitted()` runs after the lock is released. A caller who sees
+`CommitIndex() >= n` cannot assume the state machine has applied entry `n`.
+
+**Why it happened:** `ReplicatesAWriteToEveryFollowersDisk` failed about half the
+time with "node 1 never applied the write", and the node's applied index was
+correct a few microseconds later. The test waited on commit and then read the
+state machine. Applying outside the lock is intentional: holding it across an
+LSM write would serialise every node's apply behind its own network I/O.
+
+**How to apply:** Anything that needs applied state must wait on
+`StateMachine::LastAppliedIndex()`. This is the gap Phase 4's ReadIndex closes
+("confirm leadership, wait until applied >= readIndex"), and the reason a read
+path that checks `CommitIndex()` would pass most of the time and be wrong.
+
+**Cost:** Two indexes to reason about instead of one.
+
+---
+
+## D-0037: The state machine's applied index can trail Raft's
+
+**Phase:** 3, for Phase 5 to honour.
+
+**What:** `ApplyCommitted` skips `ENTRY_NOOP` and `ENTRY_CONFIG`. A new leader's
+no-op therefore advances Raft's commit index without advancing the state
+machine's applied index.
+
+**Why it matters later:** `KvStateMachine::TakeSnapshot(index, term)` requires
+`index == LastAppliedIndex()`. A Phase 5 trigger that snapshots at Raft's commit
+index will be refused whenever the newest entry is a no-op. The trigger must
+snapshot at the state machine's own applied index, and compact the Raft log to
+that.
+
+**Alternative:** Feed no-ops through `Apply` as empty commands. Rejected: it
+would need `KvStateMachine` to special-case "no command" to avoid treating it as
+malformed, bending Phase 1b code to a Phase 3 concern.
+
+**Cost:** A known interaction waiting for Phase 5. Nothing calls `TakeSnapshot`
+from the driver yet, so nothing is broken today.
+
+---
+
+## D-0038: Outbound dispatch is a detached thread per message
+
+**Phase:** 3. A known weakness, recorded so Phase 9 starts from the truth.
+
+**What:** `DispatchOutbound` starts a detached thread for each message.
+`inflight_count_` plus a condition variable lets `Stop()` wait for them.
+
+**Why:** The tick loop must never block on a peer, or one slow follower stalls
+replication to the rest. A thread per message is the simplest thing that
+guarantees that.
+
+**What is wrong with it:** There is no per-peer in-flight cap. A leader ticking
+every 15-50 ms with a 5x-tick deadline can have several requests outstanding to a
+slow peer, each on its own thread, and responses can complete out of order. Raft
+tolerates the reordering and `TruncateAndAppend` tolerates the overlap, so this
+is a resource problem rather than a correctness one. Phase 9's pipelining work
+needs a bounded window per follower, and that replaces this wholesale.
+
+---
+
+## D-0039: Never truncate a log file a live process has open
+
+**Phase:** 3. A test-script bug, recorded because it will recur.
+
+**What:** `scripts/subprocess_cluster_test.sh` first reset survivor logs with
+`: > file` to separate pre-kill from post-kill leader lines. The election worked;
+the detection did not.
+
+**Why:** A running process keeps its own file offset. Truncating the file from
+outside leaves that offset where it was, so the next write lands past a hole of
+NUL bytes. `file` reports the log as binary and `grep` stops matching lines after
+the hole. The script now never touches a live log and instead requires the new
+leader's id to differ from the killed leader's.
+
+**Related:** the same script hit bash 3.2's missing associative arrays
+(D-0007). macOS ships bash 3.2, so scripts here avoid `declare -A`.

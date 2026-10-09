@@ -8,14 +8,17 @@ whether any of it actually holds up.
 
 ## Where this is
 
-Phases 0 through 2 are done: the build, the storage engine, the replicated state
-machine, and the Raft consensus core. The core has no networking yet — Phase 3
-puts it on gRPC and a real disk — so there is no running cluster, and **no
-performance numbers**, because nothing has been benchmarked. When numbers appear
-here, each will link to raw output in `results/` produced by a committed script.
-No file, no number.
+Phases 0 through 2 are done, and Phase 3 is mostly there: the build, the storage
+engine, the replicated state machine, the Raft consensus core, a durable Raft
+log, and a real transport. Three node processes talk gRPC over localhost, elect a
+leader, replicate writes to every follower's disk, and survive the leader being
+killed with a real `SIGKILL`. There is still no client library, so nothing
+outside a node can write to a running cluster yet, and **no performance
+numbers**, because nothing has been benchmarked. When numbers appear here, each
+will link to raw output in `results/` produced by a committed script. No file,
+no number.
 
-141 tests, green under ASan, UBSan, and TSan, with clang-tidy clean. The Raft
+166 tests, green under ASan, UBSan, and TSan, with clang-tidy clean. The Raft
 core additionally runs 2000 randomized fault-injection scenarios — partitions,
 crashes, restarts, dropped, delayed, reordered, and duplicated messages —
 checking all five Raft safety invariants after every single step.
@@ -121,6 +124,20 @@ results/        raw output, committed
 ## What this doesn't do
 
 Worth saying plainly, since a system's limits are more useful than its claims:
+
+- **No client, so no external writes.** The tests that replicate data call
+  `Propose` inside the leader's own process. The real-process `SIGKILL` test
+  (`scripts/subprocess_cluster_test.sh`) proves election and rejoin survive a
+  kernel-delivered kill, but it cannot prove that acknowledged *writes* survive
+  one, because there is no way to send a write to a live process yet. That half
+  is covered by the in-process test, which destroys and rebuilds a node against
+  the same directory. It proves the persistence contract, not signal safety.
+- **`InstallSnapshot` is declared but returns `UNIMPLEMENTED`.** The core doesn't
+  handle snapshot messages until Phase 5, so a node that falls behind the
+  leader's compacted log cannot catch up yet.
+- **Outbound replication has no per-peer in-flight limit.** Every tick sends to
+  every peer on a fresh thread, so a slow follower accumulates concurrent
+  requests. Fine for three nodes on localhost, wrong for the throughput work.
 
 - **No TLS, no auth.** Every channel is insecure. Not deployable as-is.
 - **No live resharding and no membership change.** The cluster config is fixed
