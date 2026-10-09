@@ -17,6 +17,8 @@ std::string_view CodeName(Code code) {
       return "InvalidArgument";
     case Code::kNotSupported:
       return "NotSupported";
+    case Code::kUnavailable:
+      return "Unavailable";
   }
   return "Unknown";
 }

@@ -104,4 +104,10 @@ message Message {
   uint64 conflict_index = 11;
 
   SnapshotMetadata snapshot = 12;
+
+  // Opaque token tying a heartbeat response to the ReadIndex request that
+  // caused the heartbeat. A response only proves leadership as of when the
+  // matching heartbeat was SENT, so an ack for a read that arrived later must
+  // come from a heartbeat sent after it. Empty on ordinary heartbeats.
+  bytes context = 13;
 }
