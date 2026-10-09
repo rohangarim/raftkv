@@ -14,7 +14,8 @@ enum class Code : uint8_t {
   kIoError,
   kInvalidArgument,
   kNotSupported,
-  kUnavailable,  // transient: retry shortly
+  kUnavailable,  // transient, and the operation definitely did not happen: retry
+  kTimedOut,     // gave up waiting: the operation MAY have happened
 };
 
 // A small non-throwing error type. The storage engine is on the apply path,
@@ -35,6 +36,7 @@ class [[nodiscard]] Status {
     return Status(Code::kNotSupported, std::move(msg));
   }
   static Status Unavailable(std::string msg) { return Status(Code::kUnavailable, std::move(msg)); }
+  static Status TimedOut(std::string msg) { return Status(Code::kTimedOut, std::move(msg)); }
 
   bool IsOk() const { return code_ == Code::kOk; }
   Code ErrCode() const { return code_; }

@@ -52,7 +52,7 @@ class KvStateMachine final : public StateMachine {
 
   // Direct read path, used by linearizable reads in Phase 4. Does not go
   // through the log and does not touch the session table.
-  Result<std::optional<std::string>> Get(std::string_view key) const;
+  Result<std::optional<std::string>> Get(std::string_view key) const override;
 
   // Test introspection.
   Result<std::optional<proto::SessionEntry>> LookupSession(const std::string& client_id) const;
@@ -65,6 +65,11 @@ class KvStateMachine final : public StateMachine {
   static std::string MetaKey(std::string_view name);
 
   Status LoadAppliedIndex();
+
+  // Records that `index` has been consumed without changing any user data, and
+  // returns `result` unchanged unless that write itself fails. Caller holds
+  // mutex_.
+  ApplyResult AdvanceOnly(uint64_t index, ApplyResult result);
 
   // Executes the operation and fills `batch`; does not commit.
   ApplyResult Prepare(const proto::Command& command, lsm::WriteBatch* batch);

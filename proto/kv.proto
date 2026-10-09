@@ -72,10 +72,81 @@ message SessionEntry {
   // expiry can one day be driven by log position, which is deterministic
   // across replicas, rather than by wall-clock time, which is not.
   uint64 last_touch_index = 3;
+  // FNV-1a of the exact command bytes that produced `last_result`. A genuine
+  // retry is byte-identical; the same seq arriving with different bytes means a
+  // client reused its id after losing its counter, and acknowledging it from
+  // the cache would claim a write that was never applied. 0 means "not
+  // recorded" and disables the check for that entry.
+  uint64 command_digest = 4;
 }
 
 // Header written at the front of a state machine snapshot.
 message SnapshotHeader {
   uint64 last_included_index = 1;
   uint64 last_included_term = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Client-facing API.
+//
+// This is what an application talks to; Command above is what Raft replicates.
+// A request that mutates state carries (client_id, seq). The client keeps the
+// SAME seq across every retry of one logical operation, which is what lets the
+// state machine apply it exactly once even when the first attempt timed out and
+// its outcome was unknown.
+// ---------------------------------------------------------------------------
+
+message GetRequest {
+  bytes key = 1;
+}
+
+message PutRequest {
+  string client_id = 1;
+  uint64 seq = 2;
+  bytes key = 3;
+  bytes value = 4;
+}
+
+message DeleteRequest {
+  string client_id = 1;
+  uint64 seq = 2;
+  bytes key = 3;
+}
+
+message CasRequest {
+  string client_id = 1;
+  uint64 seq = 2;
+  bytes key = 3;
+  // Absent means "only if the key does not exist".
+  optional bytes expected = 4;
+  bytes new_value = 5;
+}
+
+message KvResponse {
+  enum Code {
+    OK = 0;
+    // Get: the key does not exist.
+    NOT_FOUND = 1;
+    // Cas: the comparison failed. The operation WAS applied, and the answer is
+    // no; retrying it would not change that. `value` holds what was found.
+    CAS_MISMATCH = 2;
+    // This node is not the leader. `leader_address` is a hint, possibly empty.
+    NOT_LEADER = 3;
+    // Transient and the operation definitely did not take effect. Retry.
+    UNAVAILABLE = 4;
+    // Gave up waiting. A write MAY have taken effect; retry with the same seq.
+    TIMEOUT = 5;
+    INVALID = 6;
+  }
+  Code code = 1;
+  optional bytes value = 2;
+  string leader_address = 3;
+  string message = 4;
+}
+
+service Kv {
+  rpc Get(GetRequest) returns (KvResponse);
+  rpc Put(PutRequest) returns (KvResponse);
+  rpc Delete(DeleteRequest) returns (KvResponse);
+  rpc Cas(CasRequest) returns (KvResponse);
 }

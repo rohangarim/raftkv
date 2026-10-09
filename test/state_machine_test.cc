@@ -182,6 +182,58 @@ TEST_F(StateMachineTest, DedupSurvivesRestart) {
   EXPECT_TRUE(retry.deduplicated) << "the session table did not survive recovery";
 }
 
+// A client that restarts with the same client_id and a sequence counter reset to
+// 1 sends DIFFERENT commands under sequence numbers the session has already
+// seen. Treating those as retries means answering OK for writes that were never
+// applied -- silent data loss, with no error anywhere. A true retry is
+// byte-identical, so a reused sequence number carrying different bytes is a
+// client bug that must fail loudly.
+TEST_F(StateMachineTest, ReusingASequenceNumberForADifferentCommandIsRejected) {
+  ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "first", "a")).status.IsOk());
+
+  const auto reused = Apply(2, EncodePut("c1", 1, "second", "b"));
+  EXPECT_FALSE(reused.status.IsOk())
+      << "a different write under an already-used sequence number was acknowledged";
+  EXPECT_EQ(reused.status.ErrCode(), lsm::Code::kInvalidArgument);
+  EXPECT_FALSE(reused.deduplicated);
+  EXPECT_FALSE(Get("second").has_value()) << "and it must not have been applied either";
+  EXPECT_EQ(Get("first"), "a");
+}
+
+TEST_F(StateMachineTest, AnIdenticalRetryIsStillAnsweredFromTheSession) {
+  const std::string cmd = EncodePut("c1", 1, "k", "v");
+  ASSERT_TRUE(Apply(1, cmd).status.IsOk());
+  const auto retry = Apply(2, cmd);
+  EXPECT_TRUE(retry.status.IsOk());
+  EXPECT_TRUE(retry.deduplicated);
+}
+
+// The session digest has to survive a restart, or the protection disappears
+// exactly when a restarting client needs it.
+TEST_F(StateMachineTest, TheReuseCheckSurvivesARestart) {
+  ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "first", "a")).status.IsOk());
+  ASSERT_TRUE(sm_->Sync().IsOk());
+  Open();
+  const auto reused = Apply(2, EncodePut("c1", 1, "second", "b"));
+  EXPECT_FALSE(reused.status.IsOk());
+}
+
+// A command answered from the session cache is still a log entry that was
+// consumed. If the state machine's applied index did not move, it would trail
+// Raft's, and a snapshot taken at the Raft index would be refused.
+TEST_F(StateMachineTest, ADeduplicatedCommandStillAdvancesTheAppliedIndex) {
+  const std::string cmd = EncodePut("c1", 1, "k", "v");
+  ASSERT_TRUE(Apply(1, cmd).status.IsOk());
+  ASSERT_TRUE(Apply(2, cmd).deduplicated);
+  EXPECT_EQ(sm_->LastAppliedIndex(), 2U);
+
+  const auto stale = Apply(4, EncodePut("c1", 2, "k", "w"));
+  ASSERT_TRUE(stale.status.IsOk());
+  const auto old = Apply(5, cmd);  // seq 1 again, now older than the cached seq 2
+  EXPECT_FALSE(old.status.IsOk());
+  EXPECT_EQ(sm_->LastAppliedIndex(), 5U) << "a rejected command left the applied index behind";
+}
+
 TEST_F(StateMachineTest, CommandsWithoutAClientIdAreNotDeduplicated) {
   // Internal commands (a leader's no-op entry, for instance) carry no client.
   const auto first = Apply(1, EncodePut("", 0, "k", "v1"));

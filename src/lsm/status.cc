@@ -19,6 +19,8 @@ std::string_view CodeName(Code code) {
       return "NotSupported";
     case Code::kUnavailable:
       return "Unavailable";
+    case Code::kTimedOut:
+      return "TimedOut";
   }
   return "Unknown";
 }

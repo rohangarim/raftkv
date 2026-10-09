@@ -34,6 +34,18 @@ ApplyResult ResultFromCached(const proto::CommandResult& cached) {
   return out;
 }
 
+// FNV-1a. Not cryptographic and not meant to be: this only has to tell a byte-
+// identical retry from a different command under a reused sequence number, and
+// it must be deterministic so every replica reaches the same verdict.
+uint64_t Digest(std::span<const std::byte> bytes) {
+  uint64_t h = 1469598103934665603ULL;
+  for (std::byte b : bytes) {
+    h ^= static_cast<uint8_t>(b);
+    h *= 1099511628211ULL;
+  }
+  return h == 0 ? 1 : h;  // 0 is reserved for "not recorded"
+}
+
 proto::CommandResult CacheableResult(const ApplyResult& result) {
   proto::CommandResult cached;
   if (!result.status.IsOk()) {
@@ -176,6 +188,20 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
   }
 }
 
+ApplyResult KvStateMachine::AdvanceOnly(uint64_t index, ApplyResult result) {
+  lsm::WriteBatch batch;
+  std::string encoded_index;
+  lsm::PutFixed64(&encoded_index, index);
+  batch.Put(MetaKey(kAppliedIndexKey), encoded_index);
+  const Status s = db_->Write(batch);
+  if (!s.IsOk()) {
+    result.status = s;
+    return result;
+  }
+  last_applied_index_ = index;
+  return result;
+}
+
 ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> command) {
   const std::lock_guard<std::mutex> lock(mutex_);
 
@@ -188,6 +214,8 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
     result.deduplicated = true;
     return result;
   }
+
+  const uint64_t digest = Digest(command);
 
   proto::Command parsed;
   if (!parsed.ParseFromArray(command.data(), static_cast<int>(command.size()))) {
@@ -221,14 +249,28 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
     session = looked_up.TakeValue();
 
     if (session.has_value()) {
+      // Each of these paths consumes a log entry without changing user data.
+      // The applied index must still move past it: left behind, the state
+      // machine would trail Raft's log and refuse a snapshot taken at Raft's
+      // index. Writing only the index key is cheap and deterministic.
       if (parsed.seq() == session->last_seq()) {
-        return ResultFromCached(session->last_result());
+        const bool same_command =
+            session->command_digest() == 0 || session->command_digest() == digest;
+        if (!same_command) {
+          result.status = Status::InvalidArgument(
+              "sequence " + std::to_string(parsed.seq()) + " for client '" + parsed.client_id() +
+              "' was already used by a different command; a client that loses its sequence "
+              "counter must use a new client_id");
+          return AdvanceOnly(index, std::move(result));
+        }
+        ApplyResult cached = ResultFromCached(session->last_result());
+        return AdvanceOnly(index, std::move(cached));
       }
       if (parsed.seq() < session->last_seq()) {
         result.status = Status::InvalidArgument(
             "sequence " + std::to_string(parsed.seq()) + " is older than the cached " +
             std::to_string(session->last_seq()) + "; result no longer available");
-        return result;
+        return AdvanceOnly(index, std::move(result));
       }
     }
   }
@@ -243,6 +285,7 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
     entry.set_last_seq(parsed.seq());
     *entry.mutable_last_result() = CacheableResult(result);
     entry.set_last_touch_index(index);
+    entry.set_command_digest(digest);
     batch.Put(SessionKey(parsed.client_id()), entry.SerializeAsString());
   }
 

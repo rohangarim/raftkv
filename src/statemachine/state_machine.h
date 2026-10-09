@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "lsm/status.h"
 
@@ -74,6 +75,12 @@ class StateMachine {
   virtual Status RestoreSnapshot(Snapshot& snapshot) = 0;
 
   virtual uint64_t LastAppliedIndex() const = 0;
+
+  // Reads the current value of `key`; nullopt if absent. This is a local read
+  // with NO freshness guarantee of its own -- a caller that needs a
+  // linearizable read must first obtain a read point from Raft (ReadIndex) and
+  // wait until LastAppliedIndex covers it.
+  virtual Result<std::optional<std::string>> Get(std::string_view key) const = 0;
 
   // Makes everything applied so far durable.
   //
