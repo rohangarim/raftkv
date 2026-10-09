@@ -74,3 +74,9 @@ raftkv_test(raft_read_index_test
   LIBS raftkv_raft
   TIMEOUT 600)
 target_include_directories(raft_read_index_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+raftkv_test(kv_client_test
+  SOURCES kv_client_test.cc
+  LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
+  TIMEOUT 300)
+target_include_directories(kv_client_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
