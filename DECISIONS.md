@@ -957,5 +957,7 @@ NUL bytes. `file` reports the log as binary and `grep` stops matching lines afte
 the hole. The script now never touches a live log and instead requires the new
 leader's id to differ from the killed leader's.
 
-**Related:** the same script hit bash 3.2's missing associative arrays
-(D-0007). macOS ships bash 3.2, so scripts here avoid `declare -A`.
+**Related:** the same script also hit bash 3.2's missing associative arrays.
+macOS ships bash 3.2, so scripts here avoid `declare -A`, `mapfile`, and empty
+arrays under `set -u` (see the comments in `scripts/ci.sh` and
+`scripts/format.sh`).

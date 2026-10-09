@@ -68,8 +68,7 @@ sleep 0.5
 LEADER1=$(wait_for_leader) || { echo "FAIL: no leader elected among real processes"; exit 1; }
 echo "PASS: leader elected: node $LEADER1"
 
-# bash 3.2 (macOS default) has no associative arrays -- same lesson as
-# DECISIONS.md D-0007, applying it again.
+# bash 3.2 (macOS default) has no associative arrays.
 case "$LEADER1" in
   1) VICTIM_PID=$PID1 ;;
   2) VICTIM_PID=$PID2 ;;
