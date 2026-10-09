@@ -24,7 +24,9 @@
 #include <cstdint>
 #include <functional>
 #include <random>
+#include <set>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -59,6 +61,14 @@ struct Config {
   size_t max_entries_per_append = 64;
 };
 
+// A linearizable read point: once the state machine has applied through
+// `index`, a read is safe to serve. `context` is the caller's own token from
+// ReadIndex(), echoed back so the caller can match it to the waiting request.
+struct ReadState {
+  std::string context;
+  uint64_t index = 0;
+};
+
 // Work the caller must carry out before the core may proceed.
 struct Ready {
   // Set only when it changed since the last Advance. Must be made durable
@@ -74,9 +84,17 @@ struct Ready {
   // Committed entries the state machine should apply, in order.
   std::vector<proto::Entry> committed_entries;
 
+  // ReadIndex requests whose leadership has now been confirmed by a quorum.
+  std::vector<ReadState> read_states;
+
+  // ReadIndex requests that can never complete because this node stopped being
+  // leader first. The caller should fail them now rather than wait for a
+  // timeout.
+  std::vector<std::string> dropped_reads;
+
   bool Empty() const {
     return !hard_state.has_value() && entries_to_persist.empty() && messages.empty() &&
-           committed_entries.empty();
+           committed_entries.empty() && read_states.empty() && dropped_reads.empty();
   }
 };
 
@@ -95,6 +113,19 @@ class RaftNode {
   // Appends to the leader's log. Fails if this node is not the leader; the
   // caller is expected to redirect using LeaderId().
   Status Propose(std::span<const std::byte> command);
+
+  // Starts a linearizable read. The leader records its commit index, confirms
+  // it is still leader by getting heartbeat acks from a quorum for THIS
+  // request, and then reports (context, index) in a later Ready. The caller
+  // serves the read once its state machine has applied through `index`.
+  //
+  // Errors, and why they are different:
+  //   kNotSupported -- not the leader; redirect using LeaderId().
+  //   kUnavailable  -- leader, but it has not yet committed an entry from its
+  //                    own term, so its commit index may be stale (the Figure 8
+  //                    hazard, applied to reads). Retry shortly.
+  //   kInvalidArgument -- `context` is already pending.
+  Status ReadIndex(std::string context);
 
   Ready ReadyToProcess();
   void Advance(const Ready& ready);
@@ -129,11 +160,13 @@ class RaftNode {
   void HandleAppend(const proto::Message& m);
   void HandleAppendResponse(const proto::Message& m);
   void HandleHeartbeat(const proto::Message& m);
+  void HandleHeartbeatResponse(const proto::Message& m);
+  void DropPendingReads();
 
   void Campaign();
   void BroadcastAppend();
   void SendAppend(uint64_t peer);
-  void SendHeartbeat(uint64_t peer);
+  void SendHeartbeat(uint64_t peer, const std::string& context = std::string());
   void MaybeAdvanceCommit();
 
   void Send(proto::Message message);
@@ -159,6 +192,17 @@ class RaftNode {
   uint32_t randomized_election_timeout_ = 0;
 
   std::mt19937_64 rng_;
+
+  struct PendingRead {
+    uint64_t index = 0;
+    std::set<uint64_t> acks;  // peers (including self) that confirmed leadership
+  };
+  std::unordered_map<std::string, PendingRead> pending_reads_;
+  std::vector<ReadState> ready_reads_;
+  std::vector<std::string> dropped_reads_;
+  // Index of this leader's term-start no-op. A read is only safe once the
+  // commit index has reached it.
+  uint64_t term_start_index_ = 0;
 
   std::vector<proto::Message> pending_messages_;
   uint64_t persisted_index_ = 0;

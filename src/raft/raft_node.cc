@@ -63,6 +63,7 @@ void RaftNode::BecomeFollower(uint64_t term, uint64_t leader) {
   }
   role_ = Role::kFollower;
   leader_id_ = leader;
+  DropPendingReads();
   ResetElectionTimer();
 }
 
@@ -98,6 +99,7 @@ void RaftNode::BecomeLeader() {
   // entry by replica count alone. Committing a current-term no-op carries all
   // the preceding entries with it indirectly, which is what makes the new
   // leader's state usable.
+  term_start_index_ = last + 1;
   proto::Entry noop;
   noop.set_term(term_);
   noop.set_index(last + 1);
@@ -106,6 +108,11 @@ void RaftNode::BecomeLeader() {
   (void)log_.Append(entries);
   progress_[config_.id].match_index = log_.LastIndex();
   progress_[config_.id].next_index = log_.LastIndex() + 1;
+  // In a single-node cluster the leader's own log IS a quorum, so the no-op
+  // commits immediately. Without this it would sit uncommitted until a client
+  // write happened to call MaybeAdvanceCommit, and ReadIndex would report
+  // "nothing committed in this term" on an idle one-node cluster forever.
+  MaybeAdvanceCommit();
 
   // A leadership change is a meaningful state transition worth seeing without
   // turning on debug logging, and process-level tests (real subprocesses, real
@@ -246,13 +253,14 @@ void RaftNode::Step(const proto::Message& m) {
     case proto::MSG_HEARTBEAT:
       HandleHeartbeat(m);
       break;
-    // A heartbeat response confirms the follower is alive and at our term,
-    // which Step() has already recorded for CheckQuorum above. Replication
-    // progress is driven by AppendEntries responses, so there is nothing
-    // further to do. Unknown types share this no-op deliberately: a peer
-    // running a newer build may send a message this one does not know, and
-    // ignoring it is safer than treating it as fatal.
     case proto::MSG_HEARTBEAT_RESP:
+      // Liveness for CheckQuorum was already recorded above. The only further
+      // use of a heartbeat response is confirming leadership for a ReadIndex.
+      HandleHeartbeatResponse(m);
+      break;
+    // Unknown types are ignored deliberately: a peer running a newer build may
+    // send a message this one does not know, and ignoring it is safer than
+    // treating it as fatal.
     default:
       break;
   }
@@ -399,7 +407,66 @@ void RaftNode::HandleHeartbeat(const proto::Message& m) {
   reply.set_to(m.from());
   reply.set_term(term_);
   reply.set_index(log_.LastIndex());
+  reply.set_context(m.context());
   Send(std::move(reply));
+}
+
+void RaftNode::HandleHeartbeatResponse(const proto::Message& m) {
+  if (role_ != Role::kLeader || m.context().empty()) {
+    return;
+  }
+  auto it = pending_reads_.find(m.context());
+  if (it == pending_reads_.end()) {
+    return;  // already completed, dropped, or never ours
+  }
+  // The context ties this ack to the heartbeat sent for THIS read. An ack
+  // without it, or for an older read, proves leadership only as of an earlier
+  // moment -- possibly before a newer leader existed.
+  it->second.acks.insert(m.from());
+  if (it->second.acks.size() >= Quorum()) {
+    ready_reads_.push_back({it->first, it->second.index});
+    pending_reads_.erase(it);
+  }
+}
+
+void RaftNode::DropPendingReads() {
+  for (auto& [context, pending] : pending_reads_) {
+    dropped_reads_.push_back(context);
+  }
+  pending_reads_.clear();
+}
+
+Status RaftNode::ReadIndex(std::string context) {
+  if (role_ != Role::kLeader) {
+    return Status::NotSupported("not the leader");
+  }
+  // A leader's commit index is only trustworthy once it has committed an entry
+  // from its own term. Until then it may lag what the previous leader had
+  // already acknowledged to clients, and a read at that index would be stale.
+  if (commit_index_ < term_start_index_) {
+    return Status::Unavailable("no entry committed in the current term yet");
+  }
+  if (context.empty() || pending_reads_.find(context) != pending_reads_.end()) {
+    return Status::InvalidArgument("read context must be non-empty and unique");
+  }
+
+  PendingRead pending;
+  pending.index = commit_index_;
+  pending.acks.insert(config_.id);
+
+  // A single-node cluster is its own quorum; there is nobody to ask.
+  if (pending.acks.size() >= Quorum()) {
+    ready_reads_.push_back({std::move(context), pending.index});
+    return Status::Ok();
+  }
+
+  for (uint64_t peer : config_.peers) {
+    if (peer != config_.id) {
+      SendHeartbeat(peer, context);
+    }
+  }
+  pending_reads_.emplace(std::move(context), std::move(pending));
+  return Status::Ok();
 }
 
 void RaftNode::HandleAppendResponse(const proto::Message& m) {
@@ -497,9 +564,10 @@ void RaftNode::SendAppend(uint64_t peer) {
   Send(std::move(m));
 }
 
-void RaftNode::SendHeartbeat(uint64_t peer) {
+void RaftNode::SendHeartbeat(uint64_t peer, const std::string& context) {
   proto::Message m;
   m.set_type(proto::MSG_HEARTBEAT);
+  m.set_context(context);
   m.set_from(config_.id);
   m.set_to(peer);
   m.set_term(term_);
@@ -567,6 +635,9 @@ Ready RaftNode::ReadyToProcess() {
   if (commit_index_ > applied_index_) {
     ready.committed_entries = log_.Slice(applied_index_ + 1, commit_index_);
   }
+
+  ready.read_states = ready_reads_;
+  ready.dropped_reads = dropped_reads_;
   return ready;
 }
 
@@ -584,6 +655,11 @@ void RaftNode::Advance(const Ready& ready) {
   pending_messages_.erase(
       pending_messages_.begin(),
       pending_messages_.begin() + static_cast<std::ptrdiff_t>(ready.messages.size()));
+  ready_reads_.erase(ready_reads_.begin(),
+                     ready_reads_.begin() + static_cast<std::ptrdiff_t>(ready.read_states.size()));
+  dropped_reads_.erase(
+      dropped_reads_.begin(),
+      dropped_reads_.begin() + static_cast<std::ptrdiff_t>(ready.dropped_reads.size()));
 }
 
 uint64_t RaftNode::MatchIndex(uint64_t peer) const {
