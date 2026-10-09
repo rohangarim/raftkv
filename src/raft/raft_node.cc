@@ -107,8 +107,12 @@ void RaftNode::BecomeLeader() {
   progress_[config_.id].match_index = log_.LastIndex();
   progress_[config_.id].next_index = log_.LastIndex() + 1;
 
-  LOG_DEBUG("node %llu became leader for term %llu", static_cast<unsigned long long>(config_.id),
-            static_cast<unsigned long long>(term_));
+  // A leadership change is a meaningful state transition worth seeing without
+  // turning on debug logging, and process-level tests (real subprocesses, real
+  // gRPC) key off exactly this line to detect who is leader without a client
+  // RPC to ask.
+  LOG_INFO("node %llu became leader for term %llu", static_cast<unsigned long long>(config_.id),
+           static_cast<unsigned long long>(term_));
   BroadcastAppend();
 }
 
