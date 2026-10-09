@@ -112,7 +112,12 @@ class RaftNode {
 
   // Appends to the leader's log. Fails if this node is not the leader; the
   // caller is expected to redirect using LeaderId().
-  Status Propose(std::span<const std::byte> command);
+  // On success, `index` and `term` (if given) say where the entry landed. A
+  // caller that wants to know whether ITS command committed must compare both:
+  // the same index can later hold a different term's entry if leadership
+  // changes before this one commits.
+  Status Propose(std::span<const std::byte> command, uint64_t* index = nullptr,
+                 uint64_t* term = nullptr);
 
   // Starts a linearizable read. The leader records its commit index, confirms
   // it is still leader by getting heartbeat acks from a quorum for THIS

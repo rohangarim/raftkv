@@ -204,6 +204,46 @@ TEST(RaftClusterTest, ADivergedFollowerIsRepaired) {
       << "the isolated follower never caught up after healing";
 }
 
+// If an AppendEntries response is lost, the leader must notice the follower is
+// behind and resend -- WITHOUT waiting for another client write to trigger it.
+// A system whose writers are all blocked on commits has no further proposals
+// coming, so a leader that only retransmits on a new proposal stalls forever.
+// This is the exact failure over real gRPC, where a short RPC deadline expires
+// during a follower's fsync and drops the response.
+TEST(RaftClusterTest, ALostAppendResponseIsRetransmittedWithoutNewWrites) {
+  Cluster cluster(3, /*seed=*/31);
+  const uint64_t leader = cluster.RunUntilLeader();
+  ASSERT_NE(leader, 0U);
+  for (int i = 0; i < 20; ++i) {  // let the term-start no-op settle
+    cluster.TickAll();
+    cluster.DeliverAll();
+  }
+  const uint64_t before = cluster.Node(leader)->CommitIndex();
+
+  cluster.SetDropFilter([](const proto::Message& m) { return m.type() == proto::MSG_APPEND_RESP; });
+  ASSERT_TRUE(cluster.Node(leader)->Propose(AsBytes("lost-ack")).IsOk());
+  for (int i = 0; i < 20; ++i) {
+    cluster.TickAll();
+    cluster.DeliverAll();
+  }
+  ASSERT_EQ(cluster.Node(leader)->CommitIndex(), before)
+      << "sanity: with every ack lost the entry cannot have committed";
+
+  // The network recovers. No new proposals from here on.
+  cluster.SetDropFilter(nullptr);
+  for (int i = 0; i < 40; ++i) {
+    cluster.TickAll();
+    cluster.DeliverAll();
+  }
+
+  EXPECT_GT(cluster.Node(leader)->CommitIndex(), before)
+      << "the leader never resent the entry after the acknowledgement was lost";
+  for (uint64_t id : cluster.Ids()) {
+    EXPECT_EQ(cluster.Node(id)->Log().LastIndex(), cluster.Node(leader)->Log().LastIndex())
+        << "node " << id << " is still behind";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Partitions
 // ---------------------------------------------------------------------------

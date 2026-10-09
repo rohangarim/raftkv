@@ -412,7 +412,23 @@ void RaftNode::HandleHeartbeat(const proto::Message& m) {
 }
 
 void RaftNode::HandleHeartbeatResponse(const proto::Message& m) {
-  if (role_ != Role::kLeader || m.context().empty()) {
+  if (role_ != Role::kLeader) {
+    return;
+  }
+
+  // Retransmission. AppendEntries is only otherwise sent when a client writes
+  // or when a response arrives, so a lost AppendEntries -- or a lost response
+  // to one -- would leave the follower behind until the NEXT proposal happened
+  // to trigger a send. When every writer is blocked waiting on this very
+  // commit, no further proposal is coming and replication stalls for good.
+  // A heartbeat response is the leader's periodic proof that the follower is
+  // reachable, so it is the natural moment to notice it is behind and resend.
+  auto progress = progress_.find(m.from());
+  if (progress != progress_.end() && progress->second.match_index < log_.LastIndex()) {
+    SendAppend(m.from());
+  }
+
+  if (m.context().empty()) {
     return;
   }
   auto it = pending_reads_.find(m.context());
@@ -584,7 +600,7 @@ void RaftNode::BroadcastAppend() {
   }
 }
 
-Status RaftNode::Propose(std::span<const std::byte> command) {
+Status RaftNode::Propose(std::span<const std::byte> command, uint64_t* index, uint64_t* term) {
   if (role_ != Role::kLeader) {
     return Status::NotSupported("not the leader");
   }
@@ -598,6 +614,12 @@ Status RaftNode::Propose(std::span<const std::byte> command) {
   RAFTKV_RETURN_IF_ERROR(log_.Append(entries));
   progress_[config_.id].match_index = log_.LastIndex();
   progress_[config_.id].next_index = log_.LastIndex() + 1;
+  if (index != nullptr) {
+    *index = log_.LastIndex();
+  }
+  if (term != nullptr) {
+    *term = term_;
+  }
 
   BroadcastAppend();
   MaybeAdvanceCommit();

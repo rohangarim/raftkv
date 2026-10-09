@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <random>
@@ -223,6 +224,12 @@ class Cluster {
 
   // ---- fault injection ---------------------------------------------------
 
+  // Drops any message for which `filter` returns true. Unlike the random drop
+  // rate this is exact, so a test can lose precisely the one message whose
+  // loss matters (and then stop losing it).
+  void SetDropFilter(std::function<bool(const proto::Message&)> filter) {
+    drop_filter_ = std::move(filter);
+  }
   void SetDropRate(double rate) { drop_rate_ = rate; }
   void SetDuplicateRate(double rate) { duplicate_rate_ = rate; }
   void SetMaxDelay(uint64_t steps) { max_delay_ = steps; }
@@ -317,6 +324,9 @@ class Cluster {
   }
 
   void Enqueue(const proto::Message& m) {
+    if (drop_filter_ && drop_filter_(m)) {
+      return;
+    }
     std::uniform_real_distribution<double> chance(0.0, 1.0);
     if (chance(rng_) < drop_rate_) {
       return;
@@ -341,6 +351,7 @@ class Cluster {
   bool partitioned_ = false;
   std::set<uint64_t> partition_a_;
 
+  std::function<bool(const proto::Message&)> drop_filter_;
   double drop_rate_ = 0.0;
   double duplicate_rate_ = 0.0;
   uint64_t max_delay_ = 0;
