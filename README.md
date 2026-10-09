@@ -18,7 +18,7 @@ There are still **no performance numbers**, because nothing has been
 benchmarked. When numbers appear here, each will link to raw output in
 `results/` produced by a committed script. No file, no number.
 
-197 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
+200 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
 core additionally runs 2000 randomized fault-injection scenarios — partitions,
 crashes, restarts, dropped, delayed, reordered, and duplicated messages —
 checking all five Raft safety invariants after every single step.
@@ -130,10 +130,6 @@ Worth saying plainly, since a system's limits are more useful than its claims:
   needs `tc`/`iptables` in Docker, Phase 7), no repeated runs, no linearizability
   checking (Phase 10). It shows the durable path works under a real kill; it
   does not show the system is correct under faults.
-- **An acknowledged write goes missing on a follower in a few percent of runs of
-  one stress test, and I have not found why.** See the `OPEN` entry in
-  `DECISIONS.md`. Three real bugs were found and fixed while chasing it; this
-  one is still open, and the test is kept (flaky) rather than skipped.
 - **Reads cost a quorum round trip each.** Linearizable reads use ReadIndex.
   Lease reads, which skip the round trip at the price of assuming bounded clock
   drift, are not implemented.

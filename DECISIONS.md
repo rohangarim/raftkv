@@ -1051,10 +1051,20 @@ releasing the lock. Two threads can drain `[5]` and `[6]` and race to apply them
 If 6 lands first, `KvStateMachine` records 6 as applied and then discards 5 as an
 already-applied duplicate. A committed, acknowledged write is silently lost.
 
-**Evidence the test can see it:** with the apply mutex removed, the concurrent
-writers test lost acknowledged writes on a follower in 3 of 12 runs
-(`node 2 lost writer3-39`). That is a ~25% detector, so "it passed once" meant
-nothing; the real code was run 25 times.
+**Evidence, corrected.** An earlier version of this entry said the concurrent
+writers test could see this bug: with the apply mutex removed it lost writes on a
+follower in 3 of 12 runs. That number was measured while the driver was also
+re-delivering the entire committed log on every drain (D-0047), which massively
+amplified concurrent applying. On the corrected driver the same mutant is caught
+**0 of 40** times, so for a while this guarantee had no test that would notice it
+breaking.
+
+`RaftDriverTest.ApplyIsSerialisedAndOrderedUnderConcurrentProposals` now covers
+it: a one-node driver and a fake state machine that flags overlapping or
+non-increasing `Apply` calls. Mutating away the apply mutex is caught 15 of 15.
+It took two attempts to get there: with a fake `Apply` cheaper than the fsync the
+proposer holds the lock across, the race cannot occur and the test passed even
+with the mutex gone, so the fake's cost is deliberately larger than an fsync.
 
 ---
 
@@ -1147,17 +1157,46 @@ proposals, and the sync should not hold the lock the ticker needs.
 
 ---
 
-## OPEN: acknowledged write missing on a follower in ~2-4% of concurrent runs
+## D-0047: A moved-from protobuf made the core re-emit its whole committed log
 
-**Status:** unexplained. Not resolved by D-0041 or D-0042.
+**Phase:** 4. A bug I introduced while rewriting the driver, and the real cause of
+the "acknowledged write missing on a follower" failures.
 
-`ConcurrentWritersLeaveEveryNodeWithIdenticalState` occasionally reports a
-follower missing an acknowledged write (`node 2 lost writer4-39`), always the
-last write of some writer, never with a WARN/ERROR in the log. The failing
-assertion now prints each node's commit, Raft-applied and state-machine-applied
-indexes and the writer's session entry, so the next occurrence is diagnosable.
+**What:**
+```cpp
+for (auto& entry : ready.committed_entries) apply_queue_.push_back(std::move(entry));
+...
+node_->Advance(ready);   // reads ready.committed_entries.back().index()
+```
+`Advance` learns how far the core has handed out from the last committed entry's
+index. A moved-from protobuf reads as index 0, so after every drain the core
+believed it had applied nothing and re-emitted the entire committed log from
+entry 1 on the next one. Fixed by copying; `Advance` now sees the real index.
 
-Ruled out by reading the code: out-of-order apply (the queue serialises it),
-lost wake-ups, session dedup (each writer uses sequential seqs under its own id).
-Not ruled out. This stays a known-flaky test rather than a skipped one, because
-the thing it flags may be real.
+**Why it went unnoticed.** The state machine's index-based dedup (`index <=
+last_applied`) silently absorbed every repeat, so data stayed correct and all 197
+tests passed. The only symptoms were O(history) wasted work per commit and the
+driver's applied index sweeping 1..N over and over, so a read of it could land
+anywhere in that sweep.
+
+**How it was found.** The stress test failed about 1 run in 150 with a follower
+"missing" a write. A captured timeline showed `target=265` against
+`leader_commit=321` and the leader's applied index reading 265, then 321, then
+287. Nothing was lost: the follower was two entries behind, and the test's
+catch-up gate had compared it to a transiently low target. Earlier guesses (apply
+reordering, lost wakeups, session dedup) were each plausible and each wrong;
+reading the numbers was faster than reasoning.
+
+**What now guards it.** `RedeliveredEntries()` counts any committed entry handed
+to the apply step twice or out of order; the driver logs it at ERROR and tests
+assert it is zero. Re-introducing the `std::move` is caught 10 of 10 runs.
+
+**What I got wrong along the way.** I suspected this bug also explained the
+heartbeat starvation under load. Measured, the stress test takes the same ~6 s
+before and after the fix, so it did not: the cost there is the per-write fsync
+under one lock (D-0046).
+
+**On the evidence.** 150 clean runs after the fix is *not* the proof, since the
+failure rate was about 1 in 150 and a clean 150 would occur by chance roughly a
+third of the time. The proof is the mechanism, the counter, and the mutation
+results above.
