@@ -60,19 +60,24 @@ void Cluster::CheckInvariants() {
       last_leader_log_.erase(id);
       continue;
     }
-    std::vector<std::string> current;
+    std::map<uint64_t, std::string> current;
     for (uint64_t i = node->Log().FirstIndex(); i <= node->Log().LastIndex(); ++i) {
       const proto::Entry* e = node->Log().At(i);
-      current.push_back(e != nullptr ? e->SerializeAsString() : std::string());
+      current[i] = e != nullptr ? e->SerializeAsString() : std::string();
     }
     auto previous = last_leader_log_.find(id);
     if (previous != last_leader_log_.end()) {
-      const auto& before = previous->second;
-      ASSERT_GE(current.size(), before.size())
-          << "Leader Append-Only: leader " << id << " shortened its log" << where;
-      for (size_t i = 0; i < before.size(); ++i) {
-        ASSERT_EQ(before[i], current[i])
-            << "Leader Append-Only: leader " << id << " rewrote entry at offset " << i << where;
+      // Compare by absolute index: compaction legitimately drops a prefix, but
+      // nothing at or above the new first index may change or vanish.
+      for (const auto& [index, bytes] : previous->second) {
+        if (index < node->Log().FirstIndex()) {
+          continue;
+        }
+        auto now = current.find(index);
+        ASSERT_TRUE(now != current.end())
+            << "Leader Append-Only: leader " << id << " shortened its log" << where;
+        ASSERT_EQ(bytes, now->second)
+            << "Leader Append-Only: leader " << id << " rewrote entry at index " << index << where;
       }
     }
     last_leader_log_[id] = std::move(current);

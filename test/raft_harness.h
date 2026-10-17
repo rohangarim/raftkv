@@ -35,7 +35,11 @@ namespace raftkv::raft::testing {
 // wrong.
 struct PersistentState {
   proto::HardState hard_state;
+  // Entries AFTER the snapshot: position i holds index snapshot_index + 1 + i.
   std::vector<proto::Entry> log;
+  uint64_t snapshot_index = 0;
+  uint64_t snapshot_term = 0;
+  std::string snapshot_data;
 };
 
 struct InFlight {
@@ -89,6 +93,37 @@ class Cluster {
     crashed_.erase(id);
     Start(id);
   }
+
+  // Compacts `id`'s log through everything it has applied, the way an
+  // application would after taking a state machine snapshot. The "state" here
+  // is the node's applied map, serialised, so a follower restored from it
+  // carries the same history and State Machine Safety still has teeth.
+  bool Compact(uint64_t id) {
+    RaftNode* node = Node(id);
+    if (node == nullptr || applied_[id].empty()) {
+      return false;
+    }
+    const uint64_t index = applied_[id].rbegin()->first;
+    if (index <= persisted_[id].snapshot_index) {
+      return false;
+    }
+    const std::string data = EncodeState(applied_[id]);
+    auto term = node->Log().TermAt(index);
+    if (!term.IsOk() || !node->CompactLog(index, data).IsOk()) {
+      return false;
+    }
+    PersistentState& ps = persisted_[id];
+    const uint64_t drop = index - ps.snapshot_index;
+    ps.log.erase(ps.log.begin(),
+                 ps.log.begin() + static_cast<std::ptrdiff_t>(std::min<uint64_t>(drop, ps.log.size())));
+    ps.snapshot_index = index;
+    ps.snapshot_term = *term;
+    ps.snapshot_data = data;
+    DrainReady();
+    return true;
+  }
+
+  uint64_t SnapshotsInstalled() const { return snapshots_installed_; }
 
   bool IsCrashed(uint64_t id) const { return crashed_.count(id) != 0; }
 
@@ -254,6 +289,9 @@ class Cluster {
 
     const PersistentState& state = persisted_[id];
     node->RestoreHardState(state.hard_state);
+    if (state.snapshot_index != 0) {
+      node->RestoreSnapshot(state.snapshot_index, state.snapshot_term, state.snapshot_data);
+    }
     if (!state.log.empty()) {
       // Never swallow this. A failed restore leaves a partially-populated log
       // that looks like a consensus bug several hundred steps later.
@@ -280,13 +318,22 @@ class Cluster {
       if (ready.hard_state.has_value()) {
         persisted_[id].hard_state = *ready.hard_state;
       }
+      if (ready.snapshot.has_value()) {
+        PersistentState& ps = persisted_[id];
+        ps.snapshot_index = ready.snapshot->index;
+        ps.snapshot_term = ready.snapshot->term;
+        ps.snapshot_data = ready.snapshot->data;
+        ps.log.clear();
+        applied_[id] = DecodeState(ready.snapshot->data);
+        ++snapshots_installed_;
+      }
       for (const auto& entry : ready.entries_to_persist) {
         auto& log = persisted_[id].log;
         // This vector models a WAL: position i holds log index i+1. Overwrite
         // on conflict, the way a real WAL truncates. The check matters -- a
         // gap here silently produces a restored log with wrong indices, which
         // then fails an invariant that has nothing to do with the bug.
-        const size_t pos = entry.index() - 1;
+        const size_t pos = entry.index() - persisted_[id].snapshot_index - 1;
         if (pos < log.size()) {
           log.resize(pos);
         }
@@ -323,6 +370,28 @@ class Cluster {
     CheckInvariants();
   }
 
+  static std::string EncodeState(const std::map<uint64_t, std::string>& state) {
+    std::string out;
+    for (const auto& [index, payload] : state) {
+      out += std::to_string(index) + ":" + std::to_string(payload.size()) + ":" + payload;
+    }
+    return out;
+  }
+
+  static std::map<uint64_t, std::string> DecodeState(const std::string& data) {
+    std::map<uint64_t, std::string> out;
+    size_t pos = 0;
+    while (pos < data.size()) {
+      const size_t c1 = data.find(':', pos);
+      const size_t c2 = data.find(':', c1 + 1);
+      const uint64_t index = std::stoull(data.substr(pos, c1 - pos));
+      const size_t len = std::stoull(data.substr(c1 + 1, c2 - c1 - 1));
+      out[index] = data.substr(c2 + 1, len);
+      pos = c2 + 1 + len;
+    }
+    return out;
+  }
+
   void Enqueue(const proto::Message& m) {
     if (drop_filter_ && drop_filter_(m)) {
       return;
@@ -356,6 +425,7 @@ class Cluster {
   double duplicate_rate_ = 0.0;
   uint64_t max_delay_ = 0;
   uint64_t step_ = 0;
+  uint64_t snapshots_installed_ = 0;
 
   std::map<std::string, uint64_t> read_floor_;
   std::map<std::string, uint64_t> served_reads_;
@@ -364,7 +434,7 @@ class Cluster {
   // Highest term observed with a leader, for Election Safety.
   std::map<uint64_t, uint64_t> leader_by_term_;
   // node -> last observed log, for Leader Append-Only.
-  std::map<uint64_t, std::vector<std::string>> last_leader_log_;
+  std::map<uint64_t, std::map<uint64_t, std::string>> last_leader_log_;
 };
 
 }  // namespace raftkv::raft::testing

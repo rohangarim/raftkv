@@ -43,6 +43,30 @@ Status RaftNode::RestoreLog(std::span<const proto::Entry> entries) {
   return Status::Ok();
 }
 
+void RaftNode::RestoreSnapshot(uint64_t index, uint64_t term, std::string data) {
+  log_.CompactTo(index, term);
+  snapshot_data_ = std::move(data);
+  commit_index_ = std::max(commit_index_, index);
+  applied_index_ = std::max(applied_index_, index);
+  persisted_index_ = std::max(persisted_index_, index);
+}
+
+Status RaftNode::CompactLog(uint64_t index, std::string snapshot_data) {
+  if (index > applied_index_) {
+    return Status::InvalidArgument("cannot compact past the applied index");
+  }
+  if (index <= log_.SnapshotIndex()) {
+    return Status::Ok();
+  }
+  auto term = log_.TermAt(index);
+  if (!term.IsOk()) {
+    return term.GetStatus();
+  }
+  log_.CompactTo(index, *term);
+  snapshot_data_ = std::move(snapshot_data);
+  return Status::Ok();
+}
+
 void RaftNode::MarkHardStateDirty() { hard_state_dirty_ = true; }
 
 void RaftNode::ResetElectionTimer() {
@@ -220,6 +244,14 @@ void RaftNode::Step(const proto::Message& m) {
       reply.set_term(term_);
       reply.set_reject(true);
       Send(std::move(reply));
+    } else if (m.type() == proto::MSG_SNAPSHOT) {
+      proto::Message reply;
+      reply.set_type(proto::MSG_SNAPSHOT_RESP);
+      reply.set_from(config_.id);
+      reply.set_to(m.from());
+      reply.set_term(term_);
+      reply.set_reject(true);
+      Send(std::move(reply));
     } else if (m.type() == proto::MSG_APPEND || m.type() == proto::MSG_HEARTBEAT) {
       proto::Message reply;
       reply.set_type(m.type() == proto::MSG_APPEND ? proto::MSG_APPEND_RESP
@@ -249,6 +281,12 @@ void RaftNode::Step(const proto::Message& m) {
       break;
     case proto::MSG_APPEND_RESP:
       HandleAppendResponse(m);
+      break;
+    case proto::MSG_SNAPSHOT:
+      HandleSnapshot(m);
+      break;
+    case proto::MSG_SNAPSHOT_RESP:
+      HandleSnapshotResponse(m);
       break;
     case proto::MSG_HEARTBEAT:
       HandleHeartbeat(m);
@@ -323,6 +361,17 @@ void RaftNode::HandleAppend(const proto::Message& m) {
   reply.set_to(m.from());
   reply.set_term(term_);
 
+  // The leader is probing from behind our snapshot. Everything through the
+  // snapshot index is committed and already ours, so acknowledge exactly that
+  // and let the leader resume from there; comparing terms for an index we no
+  // longer hold would be meaningless.
+  if (m.index() < log_.SnapshotIndex()) {
+    reply.set_reject(false);
+    reply.set_index(log_.SnapshotIndex());
+    Send(std::move(reply));
+    return;
+  }
+
   // The log must match at prev_index before anything is accepted.
   auto prev_term = log_.TermAt(m.index());
   const bool matches = prev_term.IsOk() && *prev_term == m.log_term();
@@ -390,6 +439,82 @@ void RaftNode::HandleAppend(const proto::Message& m) {
   reply.set_reject(false);
   reply.set_index(log_.LastIndex());
   Send(std::move(reply));
+}
+
+void RaftNode::HandleSnapshot(const proto::Message& m) {
+  leader_id_ = m.from();
+  ResetElectionTimer();
+
+  const uint64_t index = m.snapshot().last_included_index();
+  const uint64_t snap_term = m.snapshot().last_included_term();
+
+  proto::Message reply;
+  reply.set_type(proto::MSG_SNAPSHOT_RESP);
+  reply.set_from(config_.id);
+  reply.set_to(m.from());
+  reply.set_term(term_);
+
+  // Nothing to gain: we already have everything the snapshot covers.
+  if (index <= commit_index_) {
+    reply.set_index(commit_index_);
+    Send(std::move(reply));
+    return;
+  }
+
+  auto existing = log_.TermAt(index);
+  if (existing.IsOk() && *existing == snap_term) {
+    // We hold the entry the snapshot ends at, so our log is consistent with it.
+    // Keep the suffix; entries up to `index` are now known committed and will
+    // be applied normally.
+    commit_index_ = index;
+    MarkHardStateDirty();
+    reply.set_index(log_.LastIndex());
+    Send(std::move(reply));
+    return;
+  }
+
+  // The snapshot is ahead of, or conflicts with, our log. Discard the log and
+  // adopt the snapshot wholesale.
+  log_.CompactTo(index, snap_term);
+  snapshot_data_ = m.snapshot_data();
+  commit_index_ = index;
+  applied_index_ = index;
+  persisted_index_ = index;
+  MarkHardStateDirty();
+  pending_snapshot_ = InstalledSnapshot{index, snap_term, m.snapshot_data()};
+
+  reply.set_index(index);
+  Send(std::move(reply));
+}
+
+void RaftNode::HandleSnapshotResponse(const proto::Message& m) {
+  if (role_ != Role::kLeader) {
+    return;
+  }
+  auto it = progress_.find(m.from());
+  if (it == progress_.end() || m.reject()) {
+    return;
+  }
+  PeerProgress& p = it->second;
+  p.match_index = std::max(p.match_index, m.index());
+  p.next_index = p.match_index + 1;
+  MaybeAdvanceCommit();
+  if (p.match_index < log_.LastIndex()) {
+    SendAppend(m.from());
+  }
+}
+
+void RaftNode::SendSnapshot(uint64_t peer) {
+  proto::Message m;
+  m.set_type(proto::MSG_SNAPSHOT);
+  m.set_from(config_.id);
+  m.set_to(peer);
+  m.set_term(term_);
+  m.set_commit(commit_index_);
+  m.mutable_snapshot()->set_last_included_index(log_.SnapshotIndex());
+  m.mutable_snapshot()->set_last_included_term(log_.SnapshotTerm());
+  m.set_snapshot_data(snapshot_data_);
+  Send(std::move(m));
 }
 
 void RaftNode::HandleHeartbeat(const proto::Message& m) {
@@ -561,6 +686,12 @@ void RaftNode::MaybeAdvanceCommit() {
 
 void RaftNode::SendAppend(uint64_t peer) {
   const PeerProgress& p = progress_[peer];
+  // The entries this follower needs have been compacted away; only the
+  // snapshot can bring it up to date.
+  if (p.next_index < log_.FirstIndex()) {
+    SendSnapshot(peer);
+    return;
+  }
   const uint64_t prev_index = p.next_index - 1;
   auto prev_term = log_.TermAt(prev_index);
 
@@ -658,12 +789,16 @@ Ready RaftNode::ReadyToProcess() {
     ready.committed_entries = log_.Slice(applied_index_ + 1, commit_index_);
   }
 
+  ready.snapshot = pending_snapshot_;
   ready.read_states = ready_reads_;
   ready.dropped_reads = dropped_reads_;
   return ready;
 }
 
 void RaftNode::Advance(const Ready& ready) {
+  if (ready.snapshot.has_value()) {
+    pending_snapshot_.reset();
+  }
   if (ready.hard_state.has_value()) {
     last_hard_state_ = *ready.hard_state;
     hard_state_dirty_ = false;

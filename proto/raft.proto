@@ -110,4 +110,8 @@ message Message {
   // matching heartbeat was SENT, so an ack for a read that arrived later must
   // come from a heartbeat sent after it. Empty on ordinary heartbeats.
   bytes context = 13;
+
+  // MSG_SNAPSHOT: the state machine image covering the log through
+  // snapshot.last_included_index. Sent whole; chunking is a later optimisation.
+  bytes snapshot_data = 14;
 }

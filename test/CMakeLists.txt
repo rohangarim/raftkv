@@ -85,3 +85,8 @@ raftkv_test(raft_driver_test
   SOURCES raft_driver_test.cc
   LIBS raftkv_server raftkv_statemachine
   TIMEOUT 120)
+
+raftkv_test(raft_snapshot_test
+  SOURCES raft_snapshot_test.cc raft_harness.cc
+  LIBS raftkv_raft)
+target_include_directories(raft_snapshot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

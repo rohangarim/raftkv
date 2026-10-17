@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <random>
 #include <set>
 #include <span>
@@ -69,6 +70,12 @@ struct ReadState {
   uint64_t index = 0;
 };
 
+struct InstalledSnapshot {
+  uint64_t index = 0;
+  uint64_t term = 0;
+  std::string data;
+};
+
 // Work the caller must carry out before the core may proceed.
 struct Ready {
   // Set only when it changed since the last Advance. Must be made durable
@@ -92,9 +99,16 @@ struct Ready {
   // timeout.
   std::vector<std::string> dropped_reads;
 
+  // A snapshot received from the leader. The caller must persist it (and drop
+  // the log it replaces) and restore its state machine from it BEFORE sending
+  // `messages` and before applying `committed_entries`, since the reply
+  // acknowledges that the snapshot is durable.
+  std::optional<InstalledSnapshot> snapshot;
+
   bool Empty() const {
     return !hard_state.has_value() && entries_to_persist.empty() && messages.empty() &&
-           committed_entries.empty() && read_states.empty() && dropped_reads.empty();
+           committed_entries.empty() && read_states.empty() && dropped_reads.empty() &&
+           !snapshot.has_value();
   }
 };
 
@@ -106,6 +120,14 @@ class RaftNode {
   // index, leader -- is volatile and rebuilt by the protocol.
   void RestoreHardState(const proto::HardState& hard_state);
   Status RestoreLog(std::span<const proto::Entry> entries);
+  // Call after RestoreHardState and BEFORE RestoreLog: the log that follows
+  // starts at index + 1.
+  void RestoreSnapshot(uint64_t index, uint64_t term, std::string data);
+
+  // The application has captured its state through `index` (which must be
+  // applied) as `snapshot_data`. Drops the log prefix and keeps the data to
+  // send to followers that fall behind it.
+  Status CompactLog(uint64_t index, std::string snapshot_data);
 
   void Step(const proto::Message& message);
   void Tick();
@@ -164,6 +186,9 @@ class RaftNode {
   void HandleRequestVoteResponse(const proto::Message& m);
   void HandleAppend(const proto::Message& m);
   void HandleAppendResponse(const proto::Message& m);
+  void HandleSnapshot(const proto::Message& m);
+  void HandleSnapshotResponse(const proto::Message& m);
+  void SendSnapshot(uint64_t peer);
   void HandleHeartbeat(const proto::Message& m);
   void HandleHeartbeatResponse(const proto::Message& m);
   void DropPendingReads();
@@ -208,6 +233,10 @@ class RaftNode {
   // Index of this leader's term-start no-op. A read is only safe once the
   // commit index has reached it.
   uint64_t term_start_index_ = 0;
+
+  // Latest snapshot image, for sending to followers behind the log.
+  std::string snapshot_data_;
+  std::optional<InstalledSnapshot> pending_snapshot_;
 
   std::vector<proto::Message> pending_messages_;
   uint64_t persisted_index_ = 0;
