@@ -65,6 +65,12 @@ struct DriverOptions {
   // Take a snapshot and compact the Raft log once this many entries have been
   // applied since the last one. 0 disables snapshotting.
   uint64_t snapshot_threshold = 0;
+
+  // Most outbound RPCs allowed in flight to any one peer. Past this, new
+  // messages to that peer are dropped, which Raft tolerates: a slow or dead
+  // follower otherwise accumulates a blocked thread every tick. A dropped
+  // append is resent on the next heartbeat response.
+  uint32_t max_inflight_per_peer = 8;
 };
 
 // Owns one Raft group end to end: the deterministic core, its durable log and
@@ -125,6 +131,9 @@ class RaftDriver {
   // machine's index-based dedup would silently absorb while every commit costs
   // O(log length). Exposed so tests can assert it stays zero.
   uint64_t RedeliveredEntries() const;
+
+  // Outbound messages dropped because a peer was at its in-flight limit.
+  uint64_t DroppedOutbound() const;
 
   // Inbound RPC handlers. Each is synchronous: the returned Message IS the
   // reply, already extracted from a Ready that has been fully persisted.
@@ -249,6 +258,8 @@ class RaftDriver {
   // Stop().
   std::mutex inflight_mutex_;
   uint64_t inflight_count_ = 0;
+  std::unordered_map<uint64_t, uint32_t> peer_inflight_;  // guarded by inflight_mutex_
+  std::atomic<uint64_t> dropped_outbound_{0};
   std::condition_variable inflight_drained_;
 };
 

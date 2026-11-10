@@ -322,6 +322,10 @@ void RaftDriver::MaybeTakeSnapshot() {
            static_cast<unsigned long long>(applied));
 }
 
+uint64_t RaftDriver::DroppedOutbound() const {
+  return dropped_outbound_.load(std::memory_order_relaxed);
+}
+
 uint64_t RaftDriver::RedeliveredEntries() const {
   return redelivered_.load(std::memory_order_relaxed);
 }
@@ -420,6 +424,12 @@ void RaftDriver::DispatchOutbound(std::vector<proto::Message> outbound) {
   for (auto& message : outbound) {
     {
       const std::lock_guard<std::mutex> lock(inflight_mutex_);
+      uint32_t& to_peer = peer_inflight_[message.to()];
+      if (to_peer >= options_.max_inflight_per_peer) {
+        dropped_outbound_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      ++to_peer;
       ++inflight_count_;
     }
     // Detached rather than joined here: DispatchOutbound must not block the
@@ -427,8 +437,10 @@ void RaftDriver::DispatchOutbound(std::vector<proto::Message> outbound) {
     // would let one slow follower stall replication to every other. Stop()
     // is where these are waited for.
     std::thread([this, message = std::move(message)]() mutable {
+      const uint64_t peer = message.to();
       SendOne(message);
       const std::lock_guard<std::mutex> lock(inflight_mutex_);
+      --peer_inflight_[peer];
       if (--inflight_count_ == 0) {
         inflight_drained_.notify_all();
       }

@@ -139,6 +139,7 @@ class GrpcClusterFixture : public ::testing::Test {
       options.raft_config.heartbeat_tick = 1;
       options.raft_config.random_seed = id;
       options.snapshot_threshold = snapshot_threshold_;
+      options.max_inflight_per_peer = max_inflight_per_peer_;
       options.storage_dir = node.dir / "raft";
       options.peer_addresses = addresses;
       options.tick_interval_ms = 15;
@@ -219,6 +220,7 @@ class GrpcClusterFixture : public ::testing::Test {
     options.raft_config.heartbeat_tick = 1;
     options.raft_config.random_seed = id;
     options.snapshot_threshold = snapshot_threshold_;
+      options.max_inflight_per_peer = max_inflight_per_peer_;
     options.storage_dir = node.dir / "raft";  // SAME directory: this is the recovery test
     options.peer_addresses = addresses;
     options.tick_interval_ms = 15;
@@ -301,6 +303,7 @@ class GrpcClusterFixture : public ::testing::Test {
   // (Phase 9) is what removes the underlying cause.
   uint32_t election_tick_ = 10;
   uint64_t snapshot_threshold_ = 0;
+  uint32_t max_inflight_per_peer_ = 8;
 
   std::filesystem::path root_;
   std::unordered_map<uint64_t, RealNode> nodes_;

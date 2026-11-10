@@ -18,7 +18,7 @@ There are still **no performance numbers**, because nothing has been
 benchmarked. When numbers appear here, each will link to raw output in
 `results/` produced by a committed script. No file, no number.
 
-212 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
+213 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
 core additionally runs 2000 randomized fault-injection scenarios — partitions,
 crashes, restarts, dropped, delayed, reordered, and duplicated messages —
 checking all five Raft safety invariants after every single step.
@@ -146,10 +146,6 @@ Worth saying plainly, since a system's limits are more useful than its claims:
   chunked streaming is the fix. The leader also compacts its log right up to the
   snapshot, so a follower only slightly behind gets a snapshot instead of a few
   entries.
-- **Outbound replication has no per-peer in-flight limit.** Every tick sends to
-  every peer on a fresh thread, so a slow follower accumulates concurrent
-  requests. Fine for three nodes on localhost, wrong for the throughput work.
-
 - **No TLS, no auth.** Every channel is insecure. Not deployable as-is.
 - **No live resharding and no membership change.** The cluster config is fixed
   at startup; changing it means a restart.
