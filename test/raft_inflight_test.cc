@@ -32,14 +32,16 @@ class BlackHole {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
-    ::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    ::listen(fd_, 128);
+    if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(fd_, 128) != 0) {
+      ADD_FAILURE() << "could not set up the silent peer";
+    }
     socklen_t len = sizeof(addr);
     ::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len);
     address_ = "127.0.0.1:" + std::to_string(ntohs(addr.sin_port));
   }
   ~BlackHole() { ::close(fd_); }
-  const std::string& address() const { return address_; }
+  const std::string& Address() const { return address_; }
 
  private:
   int fd_ = -1;
@@ -69,7 +71,7 @@ TEST_F(RaftInflightTest, ASilentPeerIsCappedAndTheClusterStillCommits) {
   CrashNode(dead);
 
   BlackHole hole;
-  nodes_.at(leader).driver->UpdatePeerAddress(dead, hole.address());
+  nodes_.at(leader).driver->UpdatePeerAddress(dead, hole.Address());
 
   std::this_thread::sleep_for(std::chrono::milliseconds(800));
   EXPECT_GT(nodes_.at(leader).driver->DroppedOutbound(), 0U)
