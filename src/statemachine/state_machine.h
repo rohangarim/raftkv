@@ -5,6 +5,7 @@
 // them.
 
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -55,6 +56,29 @@ class Snapshot {
   // Reads up to `max_bytes` starting at `offset`. Phase 5 streams a snapshot
   // in chunks rather than materializing it in one gRPC message.
   virtual Result<std::string> ReadChunk(uint64_t offset, size_t max_bytes) const = 0;
+};
+
+// A snapshot held entirely in memory, for restoring from bytes that already
+// came off disk or the wire.
+class BytesSnapshot final : public Snapshot {
+ public:
+  BytesSnapshot(uint64_t index, uint64_t term, std::string bytes)
+      : index_(index), term_(term), bytes_(std::move(bytes)) {}
+
+  uint64_t LastIncludedIndex() const override { return index_; }
+  uint64_t LastIncludedTerm() const override { return term_; }
+  uint64_t Size() const override { return bytes_.size(); }
+  Result<std::string> ReadChunk(uint64_t offset, size_t max_bytes) const override {
+    if (offset > bytes_.size()) {
+      return Status::InvalidArgument("snapshot chunk offset past end");
+    }
+    return bytes_.substr(offset, std::min<size_t>(max_bytes, bytes_.size() - offset));
+  }
+
+ private:
+  uint64_t index_;
+  uint64_t term_;
+  std::string bytes_;
 };
 
 class StateMachine {

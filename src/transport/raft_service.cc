@@ -36,13 +36,12 @@ grpc::Status RaftGrpcService::AppendEntries(grpc::ServerContext* /*ctx*/,
 }
 
 grpc::Status RaftGrpcService::InstallSnapshot(grpc::ServerContext* /*ctx*/,
-                                              const proto::Message* /*request*/,
-                                              proto::Message* /*response*/) {
-  // RaftNode::Step does not handle MSG_SNAPSHOT yet -- that is Phase 5. This
-  // returns a real gRPC error rather than silently succeeding at nothing, so
-  // a caller that accidentally exercises this path fails loudly.
-  return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
-                      "InstallSnapshot is not implemented until Phase 5");
+                                              const proto::Message* request,
+                                              proto::Message* response) {
+  if (driver_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "driver not yet attached");
+  }
+  return ToGrpcStatus(driver_->HandleInstallSnapshot(*request, response));
 }
 
 }  // namespace raftkv::transport

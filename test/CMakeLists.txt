@@ -90,3 +90,8 @@ raftkv_test(raft_snapshot_test
   SOURCES raft_snapshot_test.cc raft_harness.cc
   LIBS raftkv_raft)
 target_include_directories(raft_snapshot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+raftkv_test(raft_grpc_snapshot_test
+  SOURCES raft_grpc_snapshot_test.cc
+  LIBS raftkv_server raftkv_transport raftkv_statemachine
+  TIMEOUT 120)

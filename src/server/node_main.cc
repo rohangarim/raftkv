@@ -118,6 +118,8 @@ int RunNode(int argc, char** argv) {
   const std::string& self_address = args.peers.at(args.id);
   grpc::ServerBuilder builder;
   builder.AddListeningPort(self_address, grpc::InsecureServerCredentials());
+  builder.SetMaxReceiveMessageSize(-1);
+  builder.SetMaxSendMessageSize(-1);
   builder.RegisterService(service.get());
   builder.RegisterService(kv_service.get());
   std::unique_ptr<grpc::Server> grpc_server = builder.BuildAndStart();
@@ -137,6 +139,7 @@ int RunNode(int argc, char** argv) {
   driver_options.storage_dir = args.dir / "raft";
   driver_options.peer_addresses = args.peers;
   driver_options.tick_interval_ms = 50;
+  driver_options.snapshot_threshold = 10000;
 
   auto driver_opened = raftkv::server::RaftDriver::Open(std::move(driver_options), state_machine);
   if (!driver_opened.IsOk()) {

@@ -1,0 +1,12 @@
+# raftkv sanitizer status after snapshots
+# recorded: 2026-11-10T07:33:23Z
+# git: 1c564e2 + working tree (snapshot wiring)
+# command: ./scripts/ci.sh asan ubsan tsan
+
+== preset: asan
+100% tests passed out of 212
+== preset: ubsan
+100% tests passed out of 212
+== preset: tsan
+100% tests passed out of 212
+# ci result: all three presets green

@@ -63,10 +63,9 @@ message SnapshotMetadata {
 // hard state and entries BEFORE extracting the reply, so there is no way to
 // answer an RPC with unpersisted state.
 //
-// InstallSnapshot is declared for wire-format completeness but not yet
-// implemented: RaftNode::Step does not handle MSG_SNAPSHOT (Phase 5 work).
-// Calling it now returns UNIMPLEMENTED rather than a handler that pretends to
-// work.
+// InstallSnapshot carries a whole state machine image in one message (see
+// Message.snapshot_data) and is answered the same way as AppendEntries: the
+// reply is the MSG_SNAPSHOT_RESP the core produced for it.
 service Raft {
   rpc RequestVote(Message) returns (Message);
   rpc AppendEntries(Message) returns (Message);

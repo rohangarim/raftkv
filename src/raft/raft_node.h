@@ -60,6 +60,10 @@ struct Config {
 
   // Cap on entries in a single AppendEntries.
   size_t max_entries_per_append = 64;
+
+  // A snapshot can be large, so a leader does not resend one to the same
+  // follower until this many ticks pass without an answer.
+  uint32_t snapshot_resend_tick = 50;
 };
 
 // A linearizable read point: once the state machine has applied through
@@ -173,6 +177,8 @@ class RaftNode {
   struct PeerProgress {
     uint64_t next_index = 1;
     uint64_t match_index = 0;
+    // Tick at which a snapshot was last sent; 0 means none outstanding.
+    uint64_t snapshot_sent_tick = 0;
   };
 
   void BecomeFollower(uint64_t term, uint64_t leader);
@@ -217,6 +223,7 @@ class RaftNode {
   // Peers heard from during the current CheckQuorum interval.
   std::unordered_map<uint64_t, bool> recent_active_;
 
+  uint64_t ticks_ = 1;
   uint32_t election_elapsed_ = 0;
   uint32_t heartbeat_elapsed_ = 0;
   uint32_t randomized_election_timeout_ = 0;

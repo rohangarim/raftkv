@@ -18,7 +18,7 @@ There are still **no performance numbers**, because nothing has been
 benchmarked. When numbers appear here, each will link to raw output in
 `results/` produced by a committed script. No file, no number.
 
-200 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
+212 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
 core additionally runs 2000 randomized fault-injection scenarios — partitions,
 crashes, restarts, dropped, delayed, reordered, and duplicated messages —
 checking all five Raft safety invariants after every single step.
@@ -140,9 +140,12 @@ Worth saying plainly, since a system's limits are more useful than its claims:
 - **Heavy concurrent writes starve heartbeats.** The driver holds its lock across
   each fsync, so under load a leader can lose leadership. Group commit (Phase 9)
   is the fix.
-- **`InstallSnapshot` is declared but returns `UNIMPLEMENTED`.** The core doesn't
-  handle snapshot messages until Phase 5, so a node that falls behind the
-  leader's compacted log cannot catch up yet.
+- **Snapshots are sent whole.** A lagging follower catches up through
+  `InstallSnapshot`, but the leader ships the entire state machine image in one
+  message and builds it in memory. Fine for megabytes, wrong for gigabytes;
+  chunked streaming is the fix. The leader also compacts its log right up to the
+  snapshot, so a follower only slightly behind gets a snapshot instead of a few
+  entries.
 - **Outbound replication has no per-peer in-flight limit.** Every tick sends to
   every peer on a fresh thread, so a slow follower accumulates concurrent
   requests. Fine for three nodes on localhost, wrong for the throughput work.

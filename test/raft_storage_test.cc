@@ -419,5 +419,81 @@ TEST_F(RaftStorageTest, CompactPrefixNeverRemovesTheActiveSegment) {
   ASSERT_TRUE(log->Sync().IsOk());
 }
 
+TEST_F(RaftStorageTest, ResetToEmptiesTheLogAndContinuesAfterTheIndex) {
+  auto log = OpenLog();
+  ASSERT_TRUE(log->Append(std::vector<proto::Entry>{MakeEntry(1, 1), MakeEntry(2, 1)}).IsOk());
+  ASSERT_TRUE(log->Sync().IsOk());
+
+  ASSERT_TRUE(log->ResetTo(50).IsOk());
+  EXPECT_EQ(log->LastIndex(), 50U);
+  ASSERT_TRUE(log->Append(std::vector<proto::Entry>{MakeEntry(51, 3)}).IsOk());
+  ASSERT_TRUE(log->Sync().IsOk());
+
+  log.reset();
+  auto reopened = OpenLog();
+  auto all = reopened->ReadAll();
+  ASSERT_TRUE(all.IsOk());
+  ASSERT_EQ(all->size(), 1U);
+  EXPECT_EQ(all->front().index(), 51U);
+  EXPECT_EQ(reopened->LastIndex(), 51U);
+}
+
+TEST_F(RaftStorageTest, SnapshotRoundTripsAcrossReopen) {
+  auto store = SnapshotStore::Open(dir_ / "snap");
+  ASSERT_TRUE(store.IsOk());
+  EXPECT_FALSE((*store)->Current().has_value());
+
+  StoredSnapshot snap{42, 7, std::string("state\0bytes", 11)};
+  ASSERT_TRUE((*store)->Save(snap).IsOk());
+  store = Result<std::unique_ptr<SnapshotStore>>(Status::Ok());
+  auto reopened = SnapshotStore::Open(dir_ / "snap");
+  ASSERT_TRUE(reopened.IsOk());
+  ASSERT_TRUE((*reopened)->Current().has_value());
+  EXPECT_EQ((*reopened)->Current()->index, 42U);
+  EXPECT_EQ((*reopened)->Current()->term, 7U);
+  EXPECT_EQ((*reopened)->Current()->data, snap.data);
+}
+
+TEST_F(RaftStorageTest, NewerSnapshotReplacesTheOlderOne) {
+  auto store = SnapshotStore::Open(dir_ / "snap");
+  ASSERT_TRUE(store.IsOk());
+  ASSERT_TRUE((*store)->Save({10, 1, "old"}).IsOk());
+  ASSERT_TRUE((*store)->Save({20, 2, "new"}).IsOk());
+  auto reopened = SnapshotStore::Open(dir_ / "snap");
+  ASSERT_TRUE(reopened.IsOk());
+  EXPECT_EQ((*reopened)->Current()->index, 20U);
+  EXPECT_EQ((*reopened)->Current()->data, "new");
+}
+
+TEST_F(RaftStorageTest, CorruptSnapshotIsRefusedNotTrusted) {
+  {
+    auto store = SnapshotStore::Open(dir_ / "snap");
+    ASSERT_TRUE(store.IsOk());
+    ASSERT_TRUE((*store)->Save({10, 1, "payload"}).IsOk());
+  }
+  {
+    std::fstream f(dir_ / "snap" / "SNAPSHOT", std::ios::in | std::ios::out | std::ios::binary);
+    f.seekp(-1, std::ios::end);
+    f.put('X');
+  }
+  auto reopened = SnapshotStore::Open(dir_ / "snap");
+  EXPECT_FALSE(reopened.IsOk());
+}
+
+TEST_F(RaftStorageTest, LeftoverTempFileFromAnInterruptedSaveIsIgnored) {
+  {
+    auto store = SnapshotStore::Open(dir_ / "snap");
+    ASSERT_TRUE(store.IsOk());
+    ASSERT_TRUE((*store)->Save({10, 1, "good"}).IsOk());
+  }
+  {
+    std::ofstream partial(dir_ / "snap" / "SNAPSHOT.tmp", std::ios::binary);
+    partial << "half a snapshot";
+  }
+  auto reopened = SnapshotStore::Open(dir_ / "snap");
+  ASSERT_TRUE(reopened.IsOk());
+  EXPECT_EQ((*reopened)->Current()->data, "good");
+}
+
 }  // namespace
 }  // namespace raftkv::storage

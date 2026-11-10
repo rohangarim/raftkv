@@ -114,6 +114,7 @@ void RaftNode::BecomeLeader() {
   for (auto& [peer, progress] : progress_) {
     progress.next_index = last + 1;
     progress.match_index = peer == config_.id ? last : 0;
+    progress.snapshot_sent_tick = 0;
   }
 
   // A no-op entry from the new leader's own term.
@@ -148,6 +149,7 @@ void RaftNode::BecomeLeader() {
 }
 
 void RaftNode::Tick() {
+  ++ticks_;
   ++election_elapsed_;
 
   if (role_ == Role::kLeader) {
@@ -496,6 +498,7 @@ void RaftNode::HandleSnapshotResponse(const proto::Message& m) {
     return;
   }
   PeerProgress& p = it->second;
+  p.snapshot_sent_tick = 0;
   p.match_index = std::max(p.match_index, m.index());
   p.next_index = p.match_index + 1;
   MaybeAdvanceCommit();
@@ -689,6 +692,11 @@ void RaftNode::SendAppend(uint64_t peer) {
   // The entries this follower needs have been compacted away; only the
   // snapshot can bring it up to date.
   if (p.next_index < log_.FirstIndex()) {
+    PeerProgress& mp = progress_[peer];
+    if (mp.snapshot_sent_tick != 0 && ticks_ - mp.snapshot_sent_tick < config_.snapshot_resend_tick) {
+      return;
+    }
+    mp.snapshot_sent_tick = ticks_;
     SendSnapshot(peer);
     return;
   }

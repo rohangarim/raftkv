@@ -61,6 +61,10 @@ struct DriverOptions {
   std::unordered_map<uint64_t, std::string> peer_addresses;
 
   uint32_t tick_interval_ms = 20;
+
+  // Take a snapshot and compact the Raft log once this many entries have been
+  // applied since the last one. 0 disables snapshotting.
+  uint64_t snapshot_threshold = 0;
 };
 
 // Owns one Raft group end to end: the deterministic core, its durable log and
@@ -126,6 +130,10 @@ class RaftDriver {
   // reply, already extracted from a Ready that has been fully persisted.
   Status HandleRequestVote(const proto::Message& request, proto::Message* response);
   Status HandleAppendEntries(const proto::Message& request, proto::Message* response);
+  Status HandleInstallSnapshot(const proto::Message& request, proto::Message* response);
+
+  // Index of the latest snapshot this node holds; 0 if none.
+  uint64_t SnapshotIndex() const;
 
   uint64_t Id() const { return options_.raft_config.id; }
   raft::Role CurrentRole() const;
@@ -144,7 +152,8 @@ class RaftDriver {
  private:
   RaftDriver(DriverOptions options, std::shared_ptr<statemachine::StateMachine> state_machine,
              std::unique_ptr<storage::HardStateStore> hard_state,
-             std::unique_ptr<storage::RaftLogStore> log);
+             std::unique_ptr<storage::RaftLogStore> log,
+             std::unique_ptr<storage::SnapshotStore> snapshots);
 
   Status Recover();
 
@@ -167,7 +176,10 @@ class RaftDriver {
   // released: apply committed entries in order, resolve finished reads, send
   // messages. Every call site goes through here so none can forget a step.
   void Finish(DrainedReady drained);
+  Status HandleInbound(const proto::Message& request, proto::Message* response,
+                       const char* what);
   void ApplyPending();
+  void MaybeTakeSnapshot();
   void ApplyBatch(const std::vector<proto::Entry>& entries);
   void ResolveReads(const std::vector<raft::ReadState>& states,
                     const std::vector<std::string>& dropped);
@@ -181,6 +193,12 @@ class RaftDriver {
   std::unique_ptr<raft::RaftNode> node_;
   std::unique_ptr<storage::HardStateStore> hard_state_;
   std::unique_ptr<storage::RaftLogStore> log_;
+  std::unique_ptr<storage::SnapshotStore> snapshots_;
+
+  // A snapshot received from the leader that the state machine has yet to
+  // adopt. Guarded by mutex_; consumed by ApplyPending.
+  std::optional<raft::InstalledSnapshot> pending_restore_;
+  uint64_t snapshot_index_ = 0;  // guarded by apply_mutex_
 
   // Guards stubs_ against concurrent redial (UpdatePeerAddress) and lookup
   // (StubFor, called from detached dispatch threads).

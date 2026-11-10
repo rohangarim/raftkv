@@ -346,6 +346,25 @@ Status RaftLogStore::TruncateSuffix(uint64_t index) {
   return Sync();
 }
 
+Status RaftLogStore::ResetTo(uint64_t index) {
+  if (active_ != nullptr) {
+    RAFTKV_RETURN_IF_ERROR(active_->Close());
+  }
+  std::error_code ec;
+  for (const auto& segment : segments_) {
+    std::filesystem::remove(segment.path, ec);
+    if (ec) {
+      return Status::IoError("removing segment during reset: " + ec.message());
+    }
+  }
+  segments_.clear();
+  active_.reset();
+  first_index_ = index + 1;
+  last_index_ = index;
+  unsynced_entries_ = 0;
+  return OpenActiveSegment();
+}
+
 Status RaftLogStore::CompactPrefix(uint64_t index) {
   // Only whole segments are removed, and only those entirely below `index`.
   // Removing part of a segment would mean a rewrite; the point of segmenting
@@ -366,6 +385,84 @@ Status RaftLogStore::CompactPrefix(uint64_t index) {
     first_index_ = segments_.front().first_index;
     RAFTKV_RETURN_IF_ERROR(lsm::SyncDirectory(options_.dir));
   }
+  return Status::Ok();
+}
+
+// ---------------------------------------------------------------------------
+// SnapshotStore
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr const char* kSnapshotName = "SNAPSHOT";
+constexpr const char* kSnapshotTemp = "SNAPSHOT.tmp";
+// crc32 + index + term, then the data.
+constexpr size_t kSnapshotHeader = 4 + 8 + 8;
+}  // namespace
+
+SnapshotStore::SnapshotStore(std::filesystem::path dir, std::optional<StoredSnapshot> current)
+    : dir_(std::move(dir)), current_(std::move(current)) {}
+
+Result<std::unique_ptr<SnapshotStore>> SnapshotStore::Open(const std::filesystem::path& dir) {
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    return Status::IoError("create " + dir.string() + ": " + ec.message());
+  }
+  // A leftover temp file is an interrupted Save; the real file is intact.
+  std::filesystem::remove(dir / kSnapshotTemp, ec);
+
+  std::optional<StoredSnapshot> current;
+  const std::filesystem::path path = dir / kSnapshotName;
+  if (std::filesystem::exists(path, ec)) {
+    auto contents = ReadWholeFile(path);
+    if (!contents.IsOk()) {
+      return contents.GetStatus();
+    }
+    if (contents->size() < kSnapshotHeader) {
+      return Status::Corruption("snapshot file is shorter than its header");
+    }
+    const uint32_t stored_crc = lsm::DecodeFixed32(contents->data());
+    const uint32_t actual = lsm::Crc32c(contents->data() + 4, contents->size() - 4);
+    if (stored_crc != actual) {
+      return Status::Corruption("snapshot file failed its checksum");
+    }
+    StoredSnapshot snap;
+    snap.index = lsm::DecodeFixed64(contents->data() + 4);
+    snap.term = lsm::DecodeFixed64(contents->data() + 12);
+    snap.data = contents->substr(kSnapshotHeader);
+    current = std::move(snap);
+  }
+  return std::unique_ptr<SnapshotStore>(new SnapshotStore(dir, std::move(current)));
+}
+
+Status SnapshotStore::Save(const StoredSnapshot& snapshot) {
+  std::string body;
+  body.reserve(16 + snapshot.data.size());
+  lsm::PutFixed64(&body, snapshot.index);
+  lsm::PutFixed64(&body, snapshot.term);
+  body.append(snapshot.data);
+  std::string file;
+  file.reserve(4 + body.size());
+  lsm::PutFixed32(&file, lsm::Crc32c(body.data(), body.size()));
+  file.append(body);
+
+  const std::filesystem::path temp = dir_ / kSnapshotTemp;
+  auto created = lsm::WritableFile::Create(temp);
+  if (!created.IsOk()) {
+    return created.GetStatus();
+  }
+  auto out = created.TakeValue();
+  RAFTKV_RETURN_IF_ERROR(out->Append(file));
+  RAFTKV_RETURN_IF_ERROR(out->Sync());
+  RAFTKV_RETURN_IF_ERROR(out->Close());
+
+  std::error_code ec;
+  std::filesystem::rename(temp, dir_ / kSnapshotName, ec);
+  if (ec) {
+    return Status::IoError("rename snapshot: " + ec.message());
+  }
+  RAFTKV_RETURN_IF_ERROR(lsm::SyncDirectory(dir_));
+  current_ = snapshot;
   return Status::Ok();
 }
 

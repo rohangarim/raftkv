@@ -8,6 +8,15 @@
 namespace raftkv::server {
 namespace {
 
+// Snapshots can run to many megabytes, well past gRPC's 4 MiB default receive
+// limit, so peer channels lift it.
+std::shared_ptr<grpc::Channel> MakeChannel(const std::string& address) {
+  grpc::ChannelArguments args;
+  args.SetMaxReceiveMessageSize(-1);
+  args.SetMaxSendMessageSize(-1);
+  return grpc::CreateCustomChannel(address, grpc::InsecureChannelCredentials(), args);
+}
+
 std::span<const std::byte> AsBytes(const std::string& s) {
   return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
 }
@@ -17,11 +26,13 @@ std::span<const std::byte> AsBytes(const std::string& s) {
 RaftDriver::RaftDriver(DriverOptions options,
                        std::shared_ptr<statemachine::StateMachine> state_machine,
                        std::unique_ptr<storage::HardStateStore> hard_state,
-                       std::unique_ptr<storage::RaftLogStore> log)
+                       std::unique_ptr<storage::RaftLogStore> log,
+                       std::unique_ptr<storage::SnapshotStore> snapshots)
     : options_(std::move(options)),
       state_machine_(std::move(state_machine)),
       hard_state_(std::move(hard_state)),
       log_(std::move(log)),
+      snapshots_(std::move(snapshots)),
       read_epoch_(std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())) {}
 
 RaftDriver::~RaftDriver() { Stop(); }
@@ -49,8 +60,14 @@ Result<std::unique_ptr<RaftDriver>> RaftDriver::Open(
     return log_opened.GetStatus();
   }
 
-  std::unique_ptr<RaftDriver> driver(new RaftDriver(std::move(options), std::move(state_machine),
-                                                    hs_opened.TakeValue(), log_opened.TakeValue()));
+  auto snap_opened = storage::SnapshotStore::Open(options.storage_dir / "snapshot");
+  if (!snap_opened.IsOk()) {
+    return snap_opened.GetStatus();
+  }
+
+  std::unique_ptr<RaftDriver> driver(
+      new RaftDriver(std::move(options), std::move(state_machine), hs_opened.TakeValue(),
+                     log_opened.TakeValue(), snap_opened.TakeValue()));
   RAFTKV_RETURN_IF_ERROR(driver->Recover());
   return driver;
 }
@@ -63,6 +80,47 @@ Status RaftDriver::Recover() {
   if (!entries.IsOk()) {
     return entries.GetStatus();
   }
+
+  if (snapshots_->Current().has_value()) {
+    const storage::StoredSnapshot& snap = *snapshots_->Current();
+
+    // The state machine may be behind the snapshot (a crash after the snapshot
+    // was saved but before it was adopted, or a freshly wiped state dir).
+    if (state_machine_->LastAppliedIndex() < snap.index) {
+      statemachine::BytesSnapshot restore(snap.index, snap.term, snap.data);
+      RAFTKV_RETURN_IF_ERROR(state_machine_->RestoreSnapshot(restore));
+    }
+
+    // Decide which log entries still belong after the snapshot. Entries at or
+    // below it are covered. Anything that does not line up with it -- a log
+    // that stops short, or disagrees on the term at the snapshot index -- is
+    // a leftover from before the snapshot replaced the log, and is dropped.
+    std::vector<proto::Entry> kept;
+    bool consistent = false;
+    for (const auto& e : *entries) {
+      if (e.index() == snap.index) {
+        consistent = e.term() == snap.term;
+      }
+    }
+    if (!entries->empty() && entries->front().index() == snap.index + 1) {
+      consistent = true;
+    }
+    if (consistent) {
+      for (auto& e : *entries) {
+        if (e.index() > snap.index) {
+          kept.push_back(std::move(e));
+        }
+      }
+    } else if (log_->LastIndex() != snap.index) {
+      RAFTKV_RETURN_IF_ERROR(log_->ResetTo(snap.index));
+    }
+    *entries = std::move(kept);
+
+    node_->RestoreSnapshot(snap.index, snap.term, snap.data);
+    snapshot_index_ = snap.index;
+    applied_raft_index_ = snap.index;
+    last_batch_index_ = snap.index;
+  }
   if (!entries->empty()) {
     RAFTKV_RETURN_IF_ERROR(node_->RestoreLog(*entries));
   }
@@ -70,8 +128,7 @@ Status RaftDriver::Recover() {
   {
     const std::lock_guard<std::mutex> lock(stubs_mutex_);
     for (auto& [peer, address] : options_.peer_addresses) {
-      stubs_[peer] =
-          proto::Raft::NewStub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
+      stubs_[peer] = proto::Raft::NewStub(MakeChannel(address));
     }
   }
 
@@ -115,6 +172,22 @@ Status RaftDriver::DrainAndPersist(DrainedReady* out) {
   // must survive a crash is written before Advance() lets the core consider
   // it handled, and before any of it is returned to a caller who might act on
   // it (answer an RPC, dispatch a message).
+  // A snapshot goes first, and before the hard state: that records a commit
+  // index covering the snapshot, which would be a lie if we crashed before the
+  // snapshot itself was durable.
+  if (ready.snapshot.has_value()) {
+    storage::StoredSnapshot stored;
+    stored.index = ready.snapshot->index;
+    stored.term = ready.snapshot->term;
+    stored.data = ready.snapshot->data;
+    RAFTKV_RETURN_IF_ERROR(snapshots_->Save(stored));
+    RAFTKV_RETURN_IF_ERROR(log_->ResetTo(stored.index));
+    // Whatever was queued to apply is covered by the snapshot now.
+    while (!apply_queue_.empty() && apply_queue_.front().index() <= stored.index) {
+      apply_queue_.pop_front();
+    }
+    pending_restore_ = *ready.snapshot;
+  }
   if (ready.hard_state.has_value()) {
     RAFTKV_RETURN_IF_ERROR(hard_state_->Save(*ready.hard_state));
   }
@@ -150,17 +223,103 @@ void RaftDriver::ApplyPending() {
   const std::lock_guard<std::mutex> apply_lock(apply_mutex_);
   while (true) {
     std::vector<proto::Entry> batch;
+    std::optional<raft::InstalledSnapshot> restore;
     {
       const std::lock_guard<std::mutex> lock(mutex_);
-      if (apply_queue_.empty()) {
-        return;
+      restore = std::move(pending_restore_);
+      pending_restore_.reset();
+      if (!restore.has_value() && apply_queue_.empty()) {
+        break;
       }
       batch.assign(std::make_move_iterator(apply_queue_.begin()),
                    std::make_move_iterator(apply_queue_.end()));
       apply_queue_.clear();
     }
+    if (restore.has_value()) {
+      // Adopt the leader's snapshot before applying anything after it.
+      statemachine::BytesSnapshot image(restore->index, restore->term, std::move(restore->data));
+      const Status s = state_machine_->RestoreSnapshot(image);
+      if (!s.IsOk()) {
+        LOG_ERROR("driver %llu: restoring snapshot at %llu failed: %s",
+                  static_cast<unsigned long long>(options_.raft_config.id),
+                  static_cast<unsigned long long>(restore->index), s.ToString().c_str());
+      }
+      snapshot_index_ = restore->index;
+      last_batch_index_ = restore->index;
+      {
+        const std::lock_guard<std::mutex> lock(waiters_mutex_);
+        applied_raft_index_ = restore->index;
+      }
+      waiters_cv_.notify_all();
+    }
     ApplyBatch(batch);
   }
+  MaybeTakeSnapshot();
+}
+
+uint64_t RaftDriver::SnapshotIndex() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return node_->Log().SnapshotIndex();
+}
+
+void RaftDriver::MaybeTakeSnapshot() {
+  if (options_.snapshot_threshold == 0) {
+    return;
+  }
+  const uint64_t applied = state_machine_->LastAppliedIndex();
+  if (applied < snapshot_index_ + options_.snapshot_threshold) {
+    return;
+  }
+
+  uint64_t term = 0;
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    auto t = node_->Log().TermAt(applied);
+    if (!t.IsOk()) {
+      return;
+    }
+    term = *t;
+  }
+
+  // The machine must be durable through `applied` before the log that could
+  // rebuild it is thrown away.
+  if (!state_machine_->Sync().IsOk()) {
+    return;
+  }
+  auto image = state_machine_->TakeSnapshot(applied, term);
+  if (!image.IsOk()) {
+    LOG_WARN("driver %llu: taking a snapshot at %llu failed: %s",
+             static_cast<unsigned long long>(options_.raft_config.id),
+             static_cast<unsigned long long>(applied), image.GetStatus().ToString().c_str());
+    return;
+  }
+  std::string data;
+  constexpr size_t kChunk = size_t{1} * 1024 * 1024;
+  while (data.size() < (*image)->Size()) {
+    auto chunk = (*image)->ReadChunk(data.size(), kChunk);
+    if (!chunk.IsOk()) {
+      return;
+    }
+    data += *chunk;
+  }
+
+  storage::StoredSnapshot stored{applied, term, data};
+  if (!snapshots_->Save(stored).IsOk()) {
+    return;
+  }
+
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (!node_->CompactLog(applied, std::move(data)).IsOk()) {
+    return;
+  }
+  if (!log_->CompactPrefix(applied).IsOk()) {
+    LOG_WARN("driver %llu: compacting the log after a snapshot failed",
+             static_cast<unsigned long long>(options_.raft_config.id));
+  }
+  snapshot_index_ = applied;
+  LOG_INFO("driver %llu: snapshot at index %llu",
+           static_cast<unsigned long long>(options_.raft_config.id),
+           static_cast<unsigned long long>(applied));
 }
 
 uint64_t RaftDriver::RedeliveredEntries() const {
@@ -251,8 +410,7 @@ proto::Raft::Stub* RaftDriver::StubFor(uint64_t peer) {
 }
 
 void RaftDriver::UpdatePeerAddress(uint64_t peer, const std::string& address) {
-  auto stub =
-      proto::Raft::NewStub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
+  auto stub = proto::Raft::NewStub(MakeChannel(address));
   const std::lock_guard<std::mutex> lock(stubs_mutex_);
   options_.peer_addresses[peer] = address;
   stubs_[peer] = std::move(stub);
@@ -285,8 +443,12 @@ void RaftDriver::SendOne(const proto::Message& message) {
   }
 
   grpc::ClientContext ctx;
-  ctx.set_deadline(std::chrono::system_clock::now() +
-                   std::chrono::milliseconds(options_.tick_interval_ms * 5));
+  // A snapshot is orders of magnitude bigger than a heartbeat, so it gets a
+  // deadline to match.
+  const auto budget = message.type() == proto::MSG_SNAPSHOT
+                          ? std::chrono::milliseconds(10000)
+                          : std::chrono::milliseconds(options_.tick_interval_ms * 5);
+  ctx.set_deadline(std::chrono::system_clock::now() + budget);
 
   proto::Message response;
   grpc::Status status;
@@ -300,6 +462,9 @@ void RaftDriver::SendOne(const proto::Message& message) {
       // field distinguishes them, and the receiving handler dispatches on
       // that field via RaftNode::Step, not on which RPC method was called.
       status = stub->AppendEntries(&ctx, message, &response);
+      break;
+    case proto::MSG_SNAPSHOT:
+      status = stub->InstallSnapshot(&ctx, message, &response);
       break;
     default:
       // Nothing the core currently emits as leader-initiated outbound traffic
@@ -495,7 +660,8 @@ Status RaftDriver::HandleRequestVote(const proto::Message& request, proto::Messa
   return Status::Ok();
 }
 
-Status RaftDriver::HandleAppendEntries(const proto::Message& request, proto::Message* response) {
+Status RaftDriver::HandleInbound(const proto::Message& request, proto::Message* response,
+                                 const char* what) {
   DrainedReady drained;
   {
     const std::lock_guard<std::mutex> lock(mutex_);
@@ -517,10 +683,18 @@ Status RaftDriver::HandleAppendEntries(const proto::Message& request, proto::Mes
   Finish(std::move(drained));
 
   if (!found) {
-    return Status::IoError("no response produced for AppendEntries from " +
+    return Status::IoError(std::string("no response produced for ") + what + " from " +
                            std::to_string(request.from()));
   }
   return Status::Ok();
+}
+
+Status RaftDriver::HandleAppendEntries(const proto::Message& request, proto::Message* response) {
+  return HandleInbound(request, response, "AppendEntries");
+}
+
+Status RaftDriver::HandleInstallSnapshot(const proto::Message& request, proto::Message* response) {
+  return HandleInbound(request, response, "InstallSnapshot");
 }
 
 raft::Role RaftDriver::CurrentRole() const {

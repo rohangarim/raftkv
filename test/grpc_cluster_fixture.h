@@ -102,6 +102,8 @@ class GrpcClusterFixture : public ::testing::Test {
       int bound_port = 0;
       grpc::ServerBuilder builder;
       builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &bound_port);
+      builder.SetMaxReceiveMessageSize(-1);
+      builder.SetMaxSendMessageSize(-1);
       builder.RegisterService(node.service.get());
       builder.RegisterService(node.kv_service.get());
       node.grpc_server = builder.BuildAndStart();
@@ -136,6 +138,7 @@ class GrpcClusterFixture : public ::testing::Test {
       options.raft_config.election_tick = election_tick_;
       options.raft_config.heartbeat_tick = 1;
       options.raft_config.random_seed = id;
+      options.snapshot_threshold = snapshot_threshold_;
       options.storage_dir = node.dir / "raft";
       options.peer_addresses = addresses;
       options.tick_interval_ms = 15;
@@ -183,6 +186,8 @@ class GrpcClusterFixture : public ::testing::Test {
     int bound_port = 0;
     grpc::ServerBuilder builder;
     builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &bound_port);
+    builder.SetMaxReceiveMessageSize(-1);
+    builder.SetMaxSendMessageSize(-1);
     builder.RegisterService(node.service.get());
     builder.RegisterService(node.kv_service.get());
     node.grpc_server = builder.BuildAndStart();
@@ -213,6 +218,7 @@ class GrpcClusterFixture : public ::testing::Test {
     options.raft_config.election_tick = election_tick_;
     options.raft_config.heartbeat_tick = 1;
     options.raft_config.random_seed = id;
+    options.snapshot_threshold = snapshot_threshold_;
     options.storage_dir = node.dir / "raft";  // SAME directory: this is the recovery test
     options.peer_addresses = addresses;
     options.tick_interval_ms = 15;
@@ -294,6 +300,7 @@ class GrpcClusterFixture : public ::testing::Test {
   // measures replication ordering rather than lock contention. Group commit
   // (Phase 9) is what removes the underlying cause.
   uint32_t election_tick_ = 10;
+  uint64_t snapshot_threshold_ = 0;
 
   std::filesystem::path root_;
   std::unordered_map<uint64_t, RealNode> nodes_;

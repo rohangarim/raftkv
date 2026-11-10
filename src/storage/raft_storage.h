@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -75,6 +76,32 @@ class HardStateStore {
   proto::HardState current_;
 };
 
+// The latest state machine snapshot, one file, replaced atomically.
+struct StoredSnapshot {
+  uint64_t index = 0;
+  uint64_t term = 0;
+  std::string data;
+};
+
+class SnapshotStore {
+ public:
+  static Result<std::unique_ptr<SnapshotStore>> Open(const std::filesystem::path& dir);
+
+  // Durable once this returns: written to a temp file, fsynced, renamed over
+  // the old one, and the directory fsynced. A crash leaves the old snapshot or
+  // the new one, never a mixture.
+  Status Save(const StoredSnapshot& snapshot);
+
+  // nullopt when none has been taken yet.
+  const std::optional<StoredSnapshot>& Current() const { return current_; }
+
+ private:
+  SnapshotStore(std::filesystem::path dir, std::optional<StoredSnapshot> current);
+
+  std::filesystem::path dir_;
+  std::optional<StoredSnapshot> current_;
+};
+
 struct LogStoreOptions {
   std::filesystem::path dir;
   // Roll to a new segment past this size. Small enough that compaction can
@@ -102,6 +129,10 @@ class RaftLogStore {
   // Drops entries at and below `index`, now covered by a snapshot. Only whole
   // segments are removed, so this is a lower bound, not exact.
   Status CompactPrefix(uint64_t index);
+
+  // Discards every entry and restarts the log empty, immediately after
+  // `index`. Used when a snapshot replaces the whole log.
+  Status ResetTo(uint64_t index);
 
   // Every entry on disk, in index order. Used once at startup.
   Result<std::vector<proto::Entry>> ReadAll();
