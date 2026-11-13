@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "client/kv_client.h"
+#include "client/shard_directory.h"
 #include "shard/shard_map.h"
 
 namespace raftkv::client {
@@ -50,16 +51,33 @@ class ShardedClient {
   // Replaces the layout, e.g. after a split. Ignored unless the epoch is newer.
   void UpdateMap(shard::ShardMap map);
 
+  // With a directory attached, a "wrong shard" answer makes the client fetch the
+  // current map and route again, so a split that happens mid-operation is
+  // invisible to the caller (beyond a short pause while a moving range is
+  // fenced). The directory must outlive the client.
+  void SetDirectory(ShardDirectory* directory);
+
   uint64_t MapEpoch() const;
   uint32_t ShardFor(std::string_view key) const;
 
  private:
   KvClient* ClientFor(const shard::ShardRange& range);
+  // Fetches the directory's map; true if it was newer than ours. Caller holds mutex_.
+  bool Refresh();
+  // Waits out a Moving/WrongShard answer. Returns false once the deadline passes.
+  bool BackOff(const Status& why, std::chrono::steady_clock::time_point deadline);
+
+  // Runs `op` against the owner of `key`, refreshing and retrying while the
+  // answer is WrongShard or Moving. Caller holds mutex_.
+  template <typename Op>
+  auto Routed(std::string_view key, Op&& op);
 
   ClientOptions base_;
   mutable std::mutex mutex_;
   shard::ShardMap map_;
+  ShardDirectory* directory_ = nullptr;
   std::map<uint32_t, std::unique_ptr<KvClient>> clients_;
+  std::map<uint32_t, std::vector<std::string>> client_addresses_;
 };
 
 }  // namespace raftkv::client

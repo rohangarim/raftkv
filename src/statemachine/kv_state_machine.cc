@@ -227,6 +227,41 @@ ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, lsm::WriteB
                                             " (already at " + std::to_string(range_.epoch()) + ")");
     return result;
   }
+  if (cmd.kind() == proto::RangeCmd::PURGE) {
+    // Only keys this group has given away may be purged. Refusing anything that
+    // overlaps the owned range is what makes it impossible to wipe live data
+    // with a mistaken or stale command.
+    if (range_.configured() && !range_.owned_empty()) {
+      const bool below_owned = !cmd.unbounded_hi() && cmd.hi() <= range_.owned_lo();
+      const bool above_owned = !range_.owned_unbounded() && cmd.lo() >= range_.owned_hi();
+      if (!below_owned && !above_owned) {
+        result.status = Status::InvalidArgument("purge range overlaps the owned range");
+        return result;
+      }
+    }
+    const std::string lo = UserKey(cmd.lo());
+    std::string hi;
+    if (cmd.unbounded_hi()) {
+      hi.push_back(static_cast<char>(kUserPrefix + 1));
+    } else {
+      hi = UserKey(cmd.hi());
+    }
+    const size_t limit = cmd.limit() == 0 ? 10000 : cmd.limit();
+    size_t deleted = 0;
+    const Status scanned = db_->Scan(lo, hi, limit, [&](std::string_view key, std::string_view) {
+      batch->Delete(key);
+      ++deleted;
+      return Status::Ok();
+    });
+    if (!scanned.IsOk()) {
+      result.status = scanned;
+      return result;
+    }
+    result.value = std::to_string(deleted);
+    result.status = Status::Ok();
+    return result;
+  }
+
   proto::RangeState next = range_;
   next.set_configured(true);
   next.set_epoch(cmd.epoch());
@@ -237,9 +272,15 @@ ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, lsm::WriteB
     next.set_owned_unbounded(cmd.unbounded_hi());
     next.set_fenced(false);  // the handover this protected has finished
   } else {
-    if (!range_.configured() || range_.owned_empty()) {
+    if (range_.configured() && range_.owned_empty()) {
       result.status = Status::InvalidArgument("cannot fence a range this group does not own");
       return result;
+    }
+    if (!range_.configured()) {
+      // A group nobody ever assigned a range owns the whole key space. Make
+      // that explicit now, so the fence has something to be inside of.
+      next.set_owned_lo("");
+      next.set_owned_unbounded(true);
     }
     next.set_fenced(true);
     next.set_fence_lo(cmd.lo());

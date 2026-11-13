@@ -53,6 +53,11 @@ class ShardMap {
   // inside an existing range, so neither half comes out empty.
   Result<ShardMap> Split(std::string_view split_key, ShardRange new_shard) const;
 
+  // A canonical byte form, so the same map always serializes identically.
+  // That is what lets the directory compare-and-swap on it.
+  std::string Serialize() const;
+  static Result<ShardMap> Deserialize(std::string_view bytes);
+
   const std::vector<ShardRange>& Ranges() const { return ranges_; }
   uint64_t Epoch() const { return epoch_; }
 

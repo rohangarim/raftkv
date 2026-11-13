@@ -699,6 +699,13 @@ TEST_F(StateMachineTest, AStaleEpochCannotUndoANewerHandover) {
   EXPECT_TRUE(Apply(3, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "", "m", false, 5)).status.IsOk());
 }
 
+TEST_F(StateMachineTest, FencingAnUnconfiguredMachineMeansItOwnedEverything) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::FENCE, "m", "", true, 1)).status.IsOk());
+  EXPECT_EQ(sm_->CheckRange("a", "a", true), RangeVerdict::kOk);
+  EXPECT_EQ(sm_->CheckRange("z", "z", true), RangeVerdict::kMoving);
+  EXPECT_EQ(sm_->CheckRange("z", "z", false), RangeVerdict::kOk);
+}
+
 TEST_F(StateMachineTest, CannotFenceWhatIsNotOwned) {
   ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", false, 1, true)).status.IsOk());
   EXPECT_FALSE(Apply(2, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "a", "b", false, 2)).status.IsOk());
@@ -729,6 +736,45 @@ TEST_F(StateMachineTest, ARefusedWriteIsCachedSoARetryGivesTheSameAnswer) {
   const auto retry = Apply(3, cmd);
   EXPECT_TRUE(retry.deduplicated);
   EXPECT_TRUE(retry.wrong_shard);
+}
+
+TEST_F(StateMachineTest, PurgeDeletesGivenAwayKeysAndNeverLiveOnes) {
+  for (char c = 'a'; c <= 'z'; ++c) {
+    ASSERT_TRUE(Apply(static_cast<uint64_t>(c), EncodePut("c", static_cast<uint64_t>(c), std::string(1, c), "v")).status.IsOk());
+  }
+  uint64_t seq = 1;
+  auto purge = [&](uint64_t index, const std::string& lo, const std::string& hi, bool unbounded, uint32_t limit) {
+    proto::Command c;
+    c.set_client_id("admin");
+    c.set_seq(seq++);
+    auto* r = c.mutable_range();
+    r->set_kind(proto::RangeCmd::PURGE);
+    r->set_lo(lo);
+    r->set_hi(hi);
+    r->set_unbounded_hi(unbounded);
+    r->set_limit(limit);
+    r->set_epoch(1);
+    return Apply(index, c.SerializeAsString());
+  };
+  // Own [a, m): purging inside it is refused and deletes nothing.
+  ASSERT_TRUE(Apply(1000, EncodeRange("o", 1, proto::RangeCmd::SET_OWNED, "a", "m", false, 1)).status.IsOk());
+  EXPECT_FALSE(purge(1001, "k", "q", false, 0).status.IsOk());
+  EXPECT_EQ(Get("k"), "v");
+
+  // [m, unbounded) is not ours: purge it in pages of 5.
+  size_t total = 0;
+  for (uint64_t i = 0; i < 10; ++i) {
+    const auto r = purge(1002 + i, "m", "", true, 5);
+    ASSERT_TRUE(r.status.IsOk());
+    const size_t n = std::stoul(*r.value);
+    total += n;
+    if (n == 0) break;
+  }
+  EXPECT_EQ(total, 14U);  // m..z
+  EXPECT_FALSE(Get("m").has_value());
+  EXPECT_FALSE(Get("z").has_value());
+  EXPECT_EQ(Get("a"), "v");
+  EXPECT_EQ(Get("l"), "v");
 }
 
 }  // namespace raftkv::statemachine

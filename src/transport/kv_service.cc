@@ -104,6 +104,10 @@ grpc::Status KvGrpcService::Mutate(grpc::ServerContext* ctx, const proto::Comman
     return grpc::Status::OK;
   }
   response->set_code(proto::KvResponse::OK);
+  const std::optional<std::string>& returned = result->value;
+  if (returned.has_value()) {
+    response->set_value(returned.value());
+  }
   return grpc::Status::OK;
 }
 
@@ -193,6 +197,7 @@ grpc::Status KvGrpcService::Range(grpc::ServerContext* ctx, const proto::RangeRe
   range->set_unbounded_hi(request->unbounded_hi());
   range->set_empty(request->empty());
   range->set_epoch(request->epoch());
+  range->set_limit(request->limit());
   return Mutate(ctx, command, response);
 }
 

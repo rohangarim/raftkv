@@ -1200,3 +1200,97 @@ under one lock (D-0046).
 failure rate was about 1 in 150 and a clean 150 would occur by chance roughly a
 third of the time. The proof is the mechanism, the counter, and the mutation
 results above.
+
+---
+
+## D-0048: Snapshots are installed whole, and the leader compacts right up to its snapshot
+
+**Phase:** 5.
+
+**What:** when a follower's `next_index` falls below the leader's first log index,
+the leader sends `MSG_SNAPSHOT` (one message, the whole state machine image).
+The follower persists it (atomic file + directory fsync) *before* its hard state,
+resets its log to start after the snapshot, and only then acknowledges. The
+driver snapshots every `snapshot_threshold` applied entries and compacts the log
+to that index.
+
+**Why persist the snapshot first:** the hard state records a commit index. If the
+node crashed after writing a commit index covering a snapshot it never saved, it
+would believe it held committed data it does not have. Recovery also checks the
+log against the snapshot's term and resets it when they disagree, so a crash
+between the two writes cannot leave a log that contradicts the snapshot.
+
+**Costs, stated plainly:** the image is built in memory and sent in one message
+(gRPC limits are lifted), so this is wrong for gigabytes. And compacting exactly
+to the snapshot means a follower only slightly behind is sent a snapshot instead
+of a few entries; a retention margin would need the core to separate "snapshot
+index" from "first retained index". A leader does not resend a snapshot to the
+same follower for `snapshot_resend_tick` ticks, so a slow follower is not buried
+under copies.
+
+---
+
+## D-0049: Multi-key writes are one Raft entry with preconditions evaluated before the writes
+
+**Phase:** 6 (SQL layer groundwork).
+
+**What:** `Batch` carries checks (key must be absent, or equal a value) and ops
+(put/delete). All checks are evaluated against the state *before* the batch; if
+any fails nothing is written and the first failing check is reported by position.
+
+**Why before, not during:** if checks could see the batch's own writes, the result
+would depend on the order of ops, and a batch could satisfy its own precondition.
+The price is that two rows with the same key in one batch both pass an
+"absent" check; the SQL layer rejects duplicates inside a statement itself.
+
+**What it is not:** atomic *per Raft group*. `ShardedClient::Batch` groups keys by
+owner and applies each group as its own entry, in shard order. Earlier groups stay
+applied if a later group's check fails, and are reported so the caller can undo
+them. Cross-shard atomicity needs transactions and is not provided.
+
+---
+
+## D-0050: A group enforces the range it owns inside the replicated apply
+
+**Phase:** 6.
+
+**What:** each group persists an owned range, an optional fence, and an epoch in
+its state machine (so they travel with snapshots). Writes outside the owned range
+are refused as `WRONG_SHARD`, writes inside a fence as `MOVING`. Both decisions are
+made in `Apply`, so every replica accepts and refuses exactly the same writes
+either side of a handover. Reads are judged after the ReadIndex wait, when the
+node's view of its range is guaranteed current.
+
+**Why enforce on the server at all:** a client's shard map can always be stale. If
+only clients knew the layout, a stale client would write to the old owner and the
+data would be lost or diverge. Making the group the authority turns a stale map
+into a retryable error instead of corruption. A stale epoch is refused, so a
+slow coordinator cannot undo a newer handover.
+
+---
+
+## D-0051: Splitting a shard: release the source before activating the target
+
+**Phase:** 6.
+
+**What:** `ShardSplitter` runs fence, copy, publish, release, activate, purge,
+recording progress in the directory after each step. Every step is idempotent, so
+a dead coordinator is resumed by a new one repeating the step it was on.
+
+**The ordering that matters:** *release* (source stops serving the range) must come
+before *activate* (target starts serving it). Reversed, a client holding the old
+map could read a stale value from the source after the target had accepted a newer
+write. In the order chosen, the moving range is briefly served by nobody, which is
+a pause rather than an inconsistency. Between fence and release the source still
+serves reads of the range but refuses writes, and the target refuses everything,
+so no value can change while two groups hold copies.
+
+**Resuming:** each coordinator instance takes a fresh client id, because the groups
+remember the last sequence number per client and would reject a lower one from a
+restarted coordinator. Tests stop a coordinator after every step and have another
+finish the split.
+
+**Limits:** one split at a time per source shard is assumed. The directory's
+compare-and-swap keeps two coordinators from publishing conflicting maps, but it
+does not stop both from fencing the same source. Purge is capped per command and
+repeated, and refuses any range overlapping what the group still owns.

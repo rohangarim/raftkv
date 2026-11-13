@@ -91,5 +91,26 @@ TEST(ShardMapTest, CreateValidatesItsInput) {
   EXPECT_FALSE(ShardMap::Create({no_addr}).IsOk());
 }
 
+TEST(ShardMapTest, SerializationRoundTripsIncludingBinaryKeys) {
+  auto map = ShardMap::Create({Range(1, ""), Range(2, std::string("a\0b", 3)), Range(7, "\xff\xfe")}, 42);
+  ASSERT_TRUE(map.IsOk());
+  const std::string bytes = map->Serialize();
+  auto back = ShardMap::Deserialize(bytes);
+  ASSERT_TRUE(back.IsOk()) << back.GetStatus().ToString();
+  EXPECT_EQ(back->Epoch(), 42U);
+  ASSERT_EQ(back->Ranges().size(), 3U);
+  EXPECT_EQ(back->Ranges()[1].start, std::string("a\0b", 3));
+  EXPECT_EQ(back->Ranges()[2].shard_id, 7U);
+  EXPECT_EQ(back->Serialize(), bytes) << "serialization must be canonical";
+}
+
+TEST(ShardMapTest, DeserializeRejectsTruncatedAndTrailingBytes) {
+  const std::string bytes = ThreeShards().Serialize();
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    EXPECT_FALSE(ShardMap::Deserialize(bytes.substr(0, cut)).IsOk()) << cut;
+  }
+  EXPECT_FALSE(ShardMap::Deserialize(bytes + "x").IsOk());
+}
+
 }  // namespace
 }  // namespace raftkv::shard

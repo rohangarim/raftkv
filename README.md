@@ -16,7 +16,7 @@ catches up from a snapshot instead of the log it no longer has.
 
 There are **no performance numbers yet**, because nothing has been benchmarked.
 When numbers show up here they'll link to raw output in `results/`. No file, no
-number. 235 tests, clang-tidy clean, green under ASan, UBSan and TSan, and the
+number. 272 tests, clang-tidy clean, green under ASan, UBSan and TSan, and the
 Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
 dropped, delayed and duplicated messages) checking all five safety invariants
 after every step. See [`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md) for what's
@@ -98,10 +98,13 @@ alternative and cost.
 - **Snapshots are sent whole**, in one message. Fine for megabytes, wrong for
   gigabytes.
 - **Reads cost a quorum round trip.** No lease reads.
-- **Sharding is client-side and static.** A range-based shard map routes keys
-  and stitches scans across independent Raft groups, but moving data between
-  groups (live splits and rebalancing) isn't built, and writes to two shards
-  aren't atomic together. No membership change, no TLS or auth.
+- **Sharding has one coordinator and no automatic balancing.** Keys are
+  range-partitioned across Raft groups, and a shard can be split live (fence,
+  copy, publish a new map, hand over, purge) while the rest of the key space
+  keeps serving. Splits are resumable after a coordinator crash. But nothing
+  decides *when* to split, there's no merge, and one split at a time per shard is
+  assumed. Writes to two shards still aren't atomic together, and there's no
+  membership change, TLS or auth.
 - **Client sessions never expire**, and storage uses full compaction rather
   than leveled.
 
@@ -112,4 +115,4 @@ src/storage/ durable log       src/server/      node process + driver
 src/client/  leader-aware client   test/        unit, cluster and gRPC tests
 ```
 
-`src/shard/` holds the range shard map. `bench/` and `chaos/` are planned and still empty.
+`src/shard/` holds the range shard map; `src/client/` has the sharded client, the directory and the split coordinator. `bench/` and `chaos/` are planned and still empty.

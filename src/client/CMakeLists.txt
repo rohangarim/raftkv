@@ -1,6 +1,8 @@
 add_library(raftkv_client STATIC
   kv_client.cc
-  sharded_client.cc)
+  sharded_client.cc
+  shard_directory.cc
+  shard_splitter.cc)
 
 target_include_directories(raftkv_client PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(raftkv_client

@@ -118,9 +118,13 @@ class KvClient {
     bool unbounded_hi = false;
     bool empty = false;
     uint64_t epoch = 0;
+    uint32_t limit = 0;  // PURGE only
   };
   Status SetOwnedRange(const RangeSpec& spec);
   Status Fence(const RangeSpec& spec);
+  // Deletes up to spec.limit keys in the given range, which must lie outside
+  // the owned range. Returns how many it deleted.
+  Result<uint64_t> Purge(const RangeSpec& spec);
   // Bulk-loads key/value pairs, bypassing the ownership check.
   Status Import(const std::vector<std::pair<std::string, std::string>>& pairs);
 

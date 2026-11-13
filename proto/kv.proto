@@ -64,6 +64,11 @@ message RangeCmd {
     // Refuse writes to [lo, hi), which must lie inside the owned range, while
     // reads continue. The range is being copied elsewhere.
     FENCE = 1;
+    // Delete up to `limit` keys in [lo, hi), which must lie entirely OUTSIDE
+    // the owned range: this reclaims keys that were handed to another group.
+    // Reports how many it deleted in the result's value, so a caller can repeat
+    // until none remain.
+    PURGE = 2;
   }
   Kind kind = 1;
   bytes lo = 2;
@@ -75,6 +80,8 @@ message RangeCmd {
   // Shard-map epoch this change belongs to. An older epoch than the last one
   // applied is refused, so a stale coordinator cannot undo a newer handover.
   uint64 epoch = 6;
+  // PURGE only.
+  uint32 limit = 7;
 }
 
 // Bulk-loads copied data during a split. Bypasses ownership checks, because the
@@ -220,6 +227,7 @@ message RangeRequest {
   bool unbounded_hi = 6;
   bool empty = 7;
   uint64 epoch = 8;
+  uint32 limit = 9;
 }
 
 message ImportRequest {

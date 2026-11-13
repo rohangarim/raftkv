@@ -279,6 +279,7 @@ proto::RangeRequest BuildRange(proto::RangeCmd::Kind kind, const KvClient::Range
   request.set_unbounded_hi(spec.unbounded_hi);
   request.set_empty(spec.empty);
   request.set_epoch(spec.epoch);
+  request.set_limit(spec.limit);
   return request;
 }
 }  // namespace
@@ -309,6 +310,24 @@ Status KvClient::Fence(const RangeSpec& spec) {
   return Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
                      proto::KvResponse* out) { return stub->Range(ctx, request, out); },
                  &response);
+}
+
+Result<uint64_t> KvClient::Purge(const RangeSpec& spec) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::RangeRequest request = BuildRange(proto::RangeCmd::PURGE, spec);
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  proto::KvResponse response;
+  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                               proto::KvResponse* out) { return stub->Range(ctx, request, out); },
+                           &response);
+  if (!s.IsOk()) {
+    return s;
+  }
+  return response.has_value() ? static_cast<uint64_t>(std::stoull(response.value())) : uint64_t{0};
 }
 
 Status KvClient::Import(const std::vector<std::pair<std::string, std::string>>& pairs) {
