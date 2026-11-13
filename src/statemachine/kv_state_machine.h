@@ -50,6 +50,8 @@ class KvStateMachine final : public StateMachine {
   uint64_t LastAppliedIndex() const override;
   Status Scan(std::string_view start, std::string_view end, size_t limit,
               const std::function<Status(std::string_view, std::string_view)>& fn) const override;
+  RangeVerdict CheckRange(std::string_view start, std::string_view end,
+                          bool write) const override;
   Status Sync() override;
 
   // Direct read path, used by linearizable reads in Phase 4. Does not go
@@ -67,6 +69,14 @@ class KvStateMachine final : public StateMachine {
   static std::string MetaKey(std::string_view name);
 
   Status LoadAppliedIndex();
+  Status LoadRange();
+
+  // Judges one key against the owned and fenced ranges. Caller holds mutex_.
+  RangeVerdict JudgeKey(std::string_view key, bool write) const;
+  // The strictest verdict over every key a command touches.
+  RangeVerdict JudgeCommand(const proto::Command& command) const;
+  // Applies a RangeCmd to `next`, filling `batch` with the persisted result.
+  ApplyResult PrepareRange(const proto::RangeCmd& cmd, lsm::WriteBatch* batch);
 
   // Records that `index` has been consumed without changing any user data, and
   // returns `result` unchanged unless that write itself fails. Caller holds
@@ -83,6 +93,13 @@ class KvStateMachine final : public StateMachine {
   // threads, so the applied index needs protection.
   mutable std::mutex mutex_;
   uint64_t last_applied_index_ = 0;
+
+  // Which keys this group serves. Unconfigured means all of them, so a plain
+  // single-group cluster needs no setup. Guarded by mutex_.
+  proto::RangeState range_;
+  // Set by Prepare when a command changes `range_`; installed by Apply only
+  // once the write that persists it has succeeded.
+  std::optional<proto::RangeState> pending_range_;
 };
 
 }  // namespace raftkv::statemachine

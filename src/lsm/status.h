@@ -16,6 +16,8 @@ enum class Code : uint8_t {
   kNotSupported,
   kUnavailable,  // transient, and the operation definitely did not happen: retry
   kTimedOut,     // gave up waiting: the operation MAY have happened
+  kWrongShard,   // the key is not in the range this group owns: refresh the shard map
+  kMoving,       // the range is mid-handover and refuses writes: retry shortly
 };
 
 // A small non-throwing error type. The storage engine is on the apply path,
@@ -37,6 +39,8 @@ class [[nodiscard]] Status {
   }
   static Status Unavailable(std::string msg) { return Status(Code::kUnavailable, std::move(msg)); }
   static Status TimedOut(std::string msg) { return Status(Code::kTimedOut, std::move(msg)); }
+  static Status WrongShard(std::string msg) { return Status(Code::kWrongShard, std::move(msg)); }
+  static Status Moving(std::string msg) { return Status(Code::kMoving, std::move(msg)); }
 
   bool IsOk() const { return code_ == Code::kOk; }
   Code ErrCode() const { return code_; }

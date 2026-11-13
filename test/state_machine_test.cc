@@ -88,6 +88,35 @@ std::string EncodeBatch(const std::string& client, uint64_t seq, const BatchSpec
   return c.SerializeAsString();
 }
 
+std::string EncodeRange(const std::string& client, uint64_t seq, proto::RangeCmd::Kind kind,
+                        const std::string& lo, const std::string& hi, bool unbounded, uint64_t epoch,
+                        bool empty = false) {
+  proto::Command c;
+  c.set_client_id(client);
+  c.set_seq(seq);
+  auto* r = c.mutable_range();
+  r->set_kind(kind);
+  r->set_lo(lo);
+  r->set_hi(hi);
+  r->set_unbounded_hi(unbounded);
+  r->set_empty(empty);
+  r->set_epoch(epoch);
+  return c.SerializeAsString();
+}
+
+std::string EncodeImport(const std::string& client, uint64_t seq,
+                         const std::vector<std::pair<std::string, std::string>>& pairs) {
+  proto::Command c;
+  c.set_client_id(client);
+  c.set_seq(seq);
+  for (const auto& [k, v] : pairs) {
+    auto* p = c.mutable_import()->add_puts();
+    p->set_key(k);
+    p->set_value(v);
+  }
+  return c.SerializeAsString();
+}
+
 class StateMachineTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -580,6 +609,126 @@ TEST_F(StateMachineTest, BatchSurvivesAReopen) {
   Open();
   EXPECT_EQ(Get("x"), "1");
   EXPECT_EQ(Get("y"), "2");
+}
+
+// ---------------------------------------------------------------------------
+// Shard ownership
+// ---------------------------------------------------------------------------
+
+TEST_F(StateMachineTest, AnUnconfiguredMachineOwnsEverything) {
+  EXPECT_EQ(sm_->CheckRange("a", "a", true), RangeVerdict::kOk);
+  EXPECT_EQ(sm_->CheckRange("", "", false), RangeVerdict::kOk);
+  EXPECT_TRUE(Apply(1, EncodePut("c", 1, "anything", "v")).status.IsOk());
+}
+
+TEST_F(StateMachineTest, WritesOutsideTheOwnedRangeAreRefusedAndChangeNothing) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
+
+  EXPECT_TRUE(Apply(2, EncodePut("c", 1, "h", "in")).status.IsOk());
+  const auto low = Apply(3, EncodePut("c", 2, "a", "out"));
+  const auto high = Apply(4, EncodePut("c", 3, "p", "boundary-is-exclusive"));
+  EXPECT_TRUE(low.wrong_shard);
+  EXPECT_TRUE(high.wrong_shard);
+  EXPECT_EQ(Get("h"), "in");
+  EXPECT_FALSE(Get("a").has_value());
+  EXPECT_FALSE(Get("p").has_value());
+
+  EXPECT_TRUE(Apply(5, EncodeCas("c", 4, "zzz", std::nullopt, "x")).wrong_shard);
+  EXPECT_TRUE(Apply(6, EncodeDelete("c", 5, "a")).wrong_shard);
+  // One stray key anywhere in a batch refuses the whole batch.
+  EXPECT_TRUE(Apply(7, EncodeBatch("c", 6, {{}, {{"h", "x"}, {"a", "y"}}})).wrong_shard);
+  EXPECT_EQ(Get("h"), "in");
+}
+
+TEST_F(StateMachineTest, CheckRangeJudgesReadsAndScans) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
+  EXPECT_EQ(sm_->CheckRange("h", "h", false), RangeVerdict::kOk);
+  EXPECT_EQ(sm_->CheckRange("a", "a", false), RangeVerdict::kWrongShard);
+  EXPECT_EQ(sm_->CheckRange("g", "p", false), RangeVerdict::kOk);
+  EXPECT_EQ(sm_->CheckRange("h", "z", false), RangeVerdict::kWrongShard);   // spills past the end
+  EXPECT_EQ(sm_->CheckRange("h", "", false), RangeVerdict::kWrongShard);    // unbounded spills too
+  EXPECT_EQ(sm_->CheckRange("a", "h", false), RangeVerdict::kWrongShard);
+}
+
+TEST_F(StateMachineTest, AnUnboundedRangeOwnsEverythingFromItsStart) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "m", "", true, 1)).status.IsOk());
+  EXPECT_EQ(sm_->CheckRange("zzzz", "zzzz", false), RangeVerdict::kOk);
+  EXPECT_EQ(sm_->CheckRange("m", "", false), RangeVerdict::kOk);
+  EXPECT_EQ(sm_->CheckRange("l", "l", false), RangeVerdict::kWrongShard);
+}
+
+TEST_F(StateMachineTest, AFenceRefusesWritesButStillAllowsReads) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", true, 1)).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePut("c", 1, "k", "before")).status.IsOk());
+  ASSERT_TRUE(Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "j", "", true, 2)).status.IsOk());
+
+  EXPECT_TRUE(Apply(4, EncodePut("c", 2, "k", "during")).moving);
+  EXPECT_TRUE(Apply(5, EncodePut("c", 3, "a", "below-the-fence")).status.IsOk());  // not fenced
+  EXPECT_EQ(Get("k"), "before");
+  EXPECT_EQ(sm_->CheckRange("k", "k", false), RangeVerdict::kOk);   // reads continue
+  EXPECT_EQ(sm_->CheckRange("k", "k", true), RangeVerdict::kMoving);
+}
+
+TEST_F(StateMachineTest, ShrinkingTheOwnedRangeEndsTheFenceAndRefusesTheMovedKeys) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", true, 1)).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePut("c", 1, "k", "v")).status.IsOk());
+  ASSERT_TRUE(Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "j", "", true, 2)).status.IsOk());
+  ASSERT_TRUE(Apply(4, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "", "j", false, 2)).status.IsOk());
+
+  EXPECT_TRUE(Apply(5, EncodePut("c", 2, "k", "moved")).wrong_shard);
+  EXPECT_EQ(sm_->CheckRange("k", "k", false), RangeVerdict::kWrongShard);
+  EXPECT_EQ(sm_->CheckRange("a", "a", true), RangeVerdict::kOk);  // fence is gone
+}
+
+TEST_F(StateMachineTest, ImportBypassesOwnershipSoATargetCanBeFilledBeforeItServes) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", false, 1, true)).status.IsOk());
+  EXPECT_TRUE(Apply(2, EncodePut("c", 1, "k", "x")).wrong_shard);  // owns nothing yet
+  ASSERT_TRUE(Apply(3, EncodeImport("admin", 2, {{"k", "copied"}, {"l", "copied2"}})).status.IsOk());
+  ASSERT_TRUE(Apply(4, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "j", "", true, 2)).status.IsOk());
+  EXPECT_EQ(Get("k"), "copied");
+  EXPECT_TRUE(Apply(5, EncodePut("c", 2, "k", "live")).status.IsOk());
+  EXPECT_EQ(Get("k"), "live");
+}
+
+TEST_F(StateMachineTest, AStaleEpochCannotUndoANewerHandover) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "m", false, 5)).status.IsOk());
+  const auto stale = Apply(2, EncodeRange("admin", 2, proto::RangeCmd::SET_OWNED, "", "", true, 3));
+  EXPECT_FALSE(stale.status.IsOk());
+  EXPECT_EQ(sm_->CheckRange("z", "z", false), RangeVerdict::kWrongShard);
+  // The same epoch is fine, which is what makes a coordinator's retry safe.
+  EXPECT_TRUE(Apply(3, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "", "m", false, 5)).status.IsOk());
+}
+
+TEST_F(StateMachineTest, CannotFenceWhatIsNotOwned) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", false, 1, true)).status.IsOk());
+  EXPECT_FALSE(Apply(2, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "a", "b", false, 2)).status.IsOk());
+}
+
+TEST_F(StateMachineTest, OwnershipSurvivesAReopenAndASnapshotRestore) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 4)).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "m", "p", false, 4)).status.IsOk());
+  Open();
+  EXPECT_EQ(sm_->CheckRange("a", "a", false), RangeVerdict::kWrongShard);
+  EXPECT_EQ(sm_->CheckRange("n", "n", true), RangeVerdict::kMoving);
+
+  auto snapshot = sm_->TakeSnapshot(sm_->LastAppliedIndex(), 1);
+  ASSERT_TRUE(snapshot.IsOk());
+  const std::filesystem::path other = dir_ / "restored";
+  std::filesystem::create_directories(other);
+  Open(&other);
+  ASSERT_TRUE(sm_->RestoreSnapshot(**snapshot).IsOk());
+  EXPECT_EQ(sm_->CheckRange("a", "a", false), RangeVerdict::kWrongShard);
+  EXPECT_EQ(sm_->CheckRange("n", "n", true), RangeVerdict::kMoving);
+  EXPECT_EQ(sm_->CheckRange("h", "h", true), RangeVerdict::kOk);
+}
+
+TEST_F(StateMachineTest, ARefusedWriteIsCachedSoARetryGivesTheSameAnswer) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
+  const std::string cmd = EncodePut("c", 1, "a", "x");
+  EXPECT_TRUE(Apply(2, cmd).wrong_shard);
+  const auto retry = Apply(3, cmd);
+  EXPECT_TRUE(retry.deduplicated);
+  EXPECT_TRUE(retry.wrong_shard);
 }
 
 }  // namespace raftkv::statemachine

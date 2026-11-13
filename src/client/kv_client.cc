@@ -170,6 +170,13 @@ Status KvClient::Execute(const Attempt& attempt, proto::KvResponse* response) {
         break;
       }
 
+      // Not retried here: the cure is a newer shard map, which only the caller
+      // holds. Surfacing it as its own code lets a sharded client refresh.
+      case proto::KvResponse::WRONG_SHARD:
+        return Status::WrongShard(reply.message());
+      case proto::KvResponse::MOVING:
+        return Status::Moving(reply.message());
+
       case proto::KvResponse::INVALID:
       default:
         return Status::InvalidArgument(reply.message());
@@ -261,6 +268,66 @@ Result<BatchOutcome> KvClient::Batch(const std::vector<BatchCheck>& checks,
     outcome.failed_check = response.failed_check();
   }
   return outcome;
+}
+
+namespace {
+proto::RangeRequest BuildRange(proto::RangeCmd::Kind kind, const KvClient::RangeSpec& spec) {
+  proto::RangeRequest request;
+  request.set_kind(kind);
+  request.set_lo(spec.lo);
+  request.set_hi(spec.hi);
+  request.set_unbounded_hi(spec.unbounded_hi);
+  request.set_empty(spec.empty);
+  request.set_epoch(spec.epoch);
+  return request;
+}
+}  // namespace
+
+Status KvClient::SetOwnedRange(const RangeSpec& spec) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::RangeRequest request = BuildRange(proto::RangeCmd::SET_OWNED, spec);
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  proto::KvResponse response;
+  return Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                     proto::KvResponse* out) { return stub->Range(ctx, request, out); },
+                 &response);
+}
+
+Status KvClient::Fence(const RangeSpec& spec) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::RangeRequest request = BuildRange(proto::RangeCmd::FENCE, spec);
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  proto::KvResponse response;
+  return Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                     proto::KvResponse* out) { return stub->Range(ctx, request, out); },
+                 &response);
+}
+
+Status KvClient::Import(const std::vector<std::pair<std::string, std::string>>& pairs) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::ImportRequest request;
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  for (const auto& [key, value] : pairs) {
+    proto::PutOp* put = request.add_puts();
+    put->set_key(key);
+    put->set_value(value);
+  }
+  proto::KvResponse response;
+  return Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                     proto::KvResponse* out) { return stub->Import(ctx, request, out); },
+                 &response);
 }
 
 Status KvClient::Put(std::string_view key, std::string_view value) {

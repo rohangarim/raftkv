@@ -45,6 +45,12 @@ void KvGrpcService::FillFromStatus(const lsm::Status& status, proto::KvResponse*
     case lsm::Code::kTimedOut:
       response->set_code(proto::KvResponse::TIMEOUT);
       break;
+    case lsm::Code::kWrongShard:
+      response->set_code(proto::KvResponse::WRONG_SHARD);
+      break;
+    case lsm::Code::kMoving:
+      response->set_code(proto::KvResponse::MOVING);
+      break;
     default:
       response->set_code(proto::KvResponse::INVALID);
       break;
@@ -75,6 +81,14 @@ grpc::Status KvGrpcService::Mutate(grpc::ServerContext* ctx, const proto::Comman
   if (!result->status.IsOk()) {
     response->set_code(proto::KvResponse::INVALID);
     response->set_message(result->status.ToString());
+    return grpc::Status::OK;
+  }
+  if (result->wrong_shard) {
+    response->set_code(proto::KvResponse::WRONG_SHARD);
+    return grpc::Status::OK;
+  }
+  if (result->moving) {
+    response->set_code(proto::KvResponse::MOVING);
     return grpc::Status::OK;
   }
   if (result->cas_mismatch) {
@@ -164,6 +178,36 @@ grpc::Status KvGrpcService::Batch(grpc::ServerContext* ctx, const proto::BatchRe
   proto::BatchCmd* batch = command.mutable_batch();
   *batch->mutable_checks() = request->checks();
   *batch->mutable_ops() = request->ops();
+  return Mutate(ctx, command, response);
+}
+
+grpc::Status KvGrpcService::Range(grpc::ServerContext* ctx, const proto::RangeRequest* request,
+                                  proto::KvResponse* response) {
+  proto::Command command;
+  command.set_client_id(request->client_id());
+  command.set_seq(request->seq());
+  proto::RangeCmd* range = command.mutable_range();
+  range->set_kind(request->kind());
+  range->set_lo(request->lo());
+  range->set_hi(request->hi());
+  range->set_unbounded_hi(request->unbounded_hi());
+  range->set_empty(request->empty());
+  range->set_epoch(request->epoch());
+  return Mutate(ctx, command, response);
+}
+
+grpc::Status KvGrpcService::Import(grpc::ServerContext* ctx, const proto::ImportRequest* request,
+                                   proto::KvResponse* response) {
+  constexpr int kMaxImport = 10000;
+  if (request->puts_size() > kMaxImport) {
+    response->set_code(proto::KvResponse::INVALID);
+    response->set_message("import chunk is too large");
+    return grpc::Status::OK;
+  }
+  proto::Command command;
+  command.set_client_id(request->client_id());
+  command.set_seq(request->seq());
+  *command.mutable_import()->mutable_puts() = request->puts();
   return Mutate(ctx, command, response);
 }
 

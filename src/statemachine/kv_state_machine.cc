@@ -27,6 +27,14 @@ ApplyResult ResultFromCached(const proto::CommandResult& cached) {
     case proto::CommandResult::NOT_FOUND:
       out.status = Status::Ok();
       break;
+    case proto::CommandResult::WRONG_SHARD:
+      out.status = Status::Ok();
+      out.wrong_shard = true;
+      break;
+    case proto::CommandResult::MOVING:
+      out.status = Status::Ok();
+      out.moving = true;
+      break;
     default:
       out.status = Status::InvalidArgument("cached result: invalid command");
       break;
@@ -53,6 +61,14 @@ proto::CommandResult CacheableResult(const ApplyResult& result) {
   proto::CommandResult cached;
   if (!result.status.IsOk()) {
     cached.set_code(proto::CommandResult::INVALID);
+    return cached;
+  }
+  if (result.wrong_shard) {
+    cached.set_code(proto::CommandResult::WRONG_SHARD);
+    return cached;
+  }
+  if (result.moving) {
+    cached.set_code(proto::CommandResult::MOVING);
     return cached;
   }
   cached.set_code(result.cas_mismatch ? proto::CommandResult::CAS_MISMATCH
@@ -95,6 +111,7 @@ Result<std::unique_ptr<KvStateMachine>> KvStateMachine::Open(lsm::Options option
   }
   std::unique_ptr<KvStateMachine> sm(new KvStateMachine(opened.TakeValue()));
   RAFTKV_RETURN_IF_ERROR(sm->LoadAppliedIndex());
+  RAFTKV_RETURN_IF_ERROR(sm->LoadRange());
   return sm;
 }
 
@@ -116,6 +133,123 @@ Status KvStateMachine::LoadAppliedIndex() {
   LOG_INFO("statemachine: recovered at applied index %llu",
            static_cast<unsigned long long>(last_applied_index_));
   return Status::Ok();
+}
+
+Status KvStateMachine::LoadRange() {
+  auto got = db_->Get(MetaKey("range"));
+  if (!got.IsOk()) {
+    return got.GetStatus();
+  }
+  range_ = proto::RangeState();
+  const std::optional<std::string>& stored = *got;
+  if (stored.has_value() && !range_.ParseFromString(stored.value())) {
+    return Status::Corruption("range state failed to parse");
+  }
+  return Status::Ok();
+}
+
+RangeVerdict KvStateMachine::JudgeKey(std::string_view key, bool write) const {
+  if (!range_.configured()) {
+    return RangeVerdict::kOk;
+  }
+  if (range_.owned_empty()) {
+    return RangeVerdict::kWrongShard;
+  }
+  if (key < std::string_view(range_.owned_lo()) ||
+      (!range_.owned_unbounded() && key >= std::string_view(range_.owned_hi()))) {
+    return RangeVerdict::kWrongShard;
+  }
+  if (write && range_.fenced() && key >= std::string_view(range_.fence_lo()) &&
+      (range_.fence_unbounded() || key < std::string_view(range_.fence_hi()))) {
+    return RangeVerdict::kMoving;
+  }
+  return RangeVerdict::kOk;
+}
+
+RangeVerdict KvStateMachine::CheckRange(std::string_view start, std::string_view end,
+                                        bool write) const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (start == end) {
+    return JudgeKey(start, write);
+  }
+  if (!range_.configured()) {
+    return RangeVerdict::kOk;
+  }
+  if (range_.owned_empty()) {
+    return RangeVerdict::kWrongShard;
+  }
+  // [start, end) must sit entirely inside the owned range.
+  const bool low_ok = start >= std::string_view(range_.owned_lo());
+  const bool high_ok =
+      range_.owned_unbounded() || (!end.empty() && end <= std::string_view(range_.owned_hi()));
+  if (!low_ok || !high_ok) {
+    return RangeVerdict::kWrongShard;
+  }
+  return RangeVerdict::kOk;
+}
+
+RangeVerdict KvStateMachine::JudgeCommand(const proto::Command& command) const {
+  RangeVerdict worst = RangeVerdict::kOk;
+  auto fold = [&worst](RangeVerdict v) {
+    if (v == RangeVerdict::kWrongShard || (v == RangeVerdict::kMoving && worst == RangeVerdict::kOk)) {
+      worst = v;
+    }
+  };
+  switch (command.op_case()) {
+    case proto::Command::kPut:
+      fold(JudgeKey(command.put().key(), true));
+      break;
+    case proto::Command::kDelete:
+      fold(JudgeKey(command.delete_().key(), true));
+      break;
+    case proto::Command::kCas:
+      fold(JudgeKey(command.cas().key(), true));
+      break;
+    case proto::Command::kBatch:
+      for (const auto& check : command.batch().checks()) {
+        fold(JudgeKey(check.key(), true));
+      }
+      for (const auto& op : command.batch().ops()) {
+        fold(JudgeKey(op.op_case() == proto::BatchOp::kPut ? op.put().key() : op.delete_().key(),
+                      true));
+      }
+      break;
+    default:
+      break;
+  }
+  return worst;
+}
+
+ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, lsm::WriteBatch* batch) {
+  ApplyResult result;
+  if (cmd.epoch() < range_.epoch()) {
+    result.status = Status::InvalidArgument("stale shard epoch " + std::to_string(cmd.epoch()) +
+                                            " (already at " + std::to_string(range_.epoch()) + ")");
+    return result;
+  }
+  proto::RangeState next = range_;
+  next.set_configured(true);
+  next.set_epoch(cmd.epoch());
+  if (cmd.kind() == proto::RangeCmd::SET_OWNED) {
+    next.set_owned_empty(cmd.empty());
+    next.set_owned_lo(cmd.lo());
+    next.set_owned_hi(cmd.hi());
+    next.set_owned_unbounded(cmd.unbounded_hi());
+    next.set_fenced(false);  // the handover this protected has finished
+  } else {
+    if (!range_.configured() || range_.owned_empty()) {
+      result.status = Status::InvalidArgument("cannot fence a range this group does not own");
+      return result;
+    }
+    next.set_fenced(true);
+    next.set_fence_lo(cmd.lo());
+    next.set_fence_hi(cmd.hi());
+    next.set_fence_unbounded(cmd.unbounded_hi());
+  }
+  batch->Put(MetaKey("range"), next.SerializeAsString());
+  pending_range_ = std::move(next);
+  result.status = Status::Ok();
+  return result;
 }
 
 uint64_t KvStateMachine::LastAppliedIndex() const {
@@ -166,6 +300,16 @@ Result<std::optional<proto::SessionEntry>> KvStateMachine::LookupSession(
 
 ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBatch* batch) {
   ApplyResult result;
+
+  // Ownership is decided here, inside the replicated apply, so every replica
+  // accepts or refuses exactly the same writes either side of a handover.
+  const RangeVerdict verdict = JudgeCommand(command);
+  if (verdict != RangeVerdict::kOk) {
+    result.status = Status::Ok();
+    result.wrong_shard = verdict == RangeVerdict::kWrongShard;
+    result.moving = verdict == RangeVerdict::kMoving;
+    return result;
+  }
 
   switch (command.op_case()) {
     case proto::Command::kPut:
@@ -244,6 +388,16 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
       result.status = Status::Ok();
       return result;
     }
+
+    case proto::Command::kRange:
+      return PrepareRange(command.range(), batch);
+
+    case proto::Command::kImport:
+      for (const auto& put : command.import().puts()) {
+        batch->Put(UserKey(put.key()), put.value());
+      }
+      result.status = Status::Ok();
+      return result;
 
     case proto::Command::OP_NOT_SET:
     default:
@@ -359,10 +513,15 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
 
   const Status s = db_->Write(batch);
   if (!s.IsOk()) {
+    pending_range_.reset();
     result.status = s;
     return result;
   }
   last_applied_index_ = index;
+  if (pending_range_.has_value()) {
+    range_ = std::move(*pending_range_);
+    pending_range_.reset();
+  }
   return result;
 }
 
@@ -499,6 +658,7 @@ Status KvStateMachine::RestoreSnapshot(Snapshot& snapshot) {
 
   RAFTKV_RETURN_IF_ERROR(db_->SyncWal());
   last_applied_index_ = header.last_included_index();
+  RAFTKV_RETURN_IF_ERROR(LoadRange());
 
   LOG_INFO("statemachine: restored snapshot at index %llu term %llu",
            static_cast<unsigned long long>(header.last_included_index()),

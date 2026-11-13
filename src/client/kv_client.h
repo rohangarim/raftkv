@@ -110,6 +110,20 @@ class KvClient {
   // One page of [start, end) in key order. An empty `end` is unbounded; `limit`
   // 0 takes the server default.
   Result<ScanPage> Scan(std::string_view start, std::string_view end, uint32_t limit = 0);
+  // Shard administration, used by the split coordinator. Each is a replicated
+  // command applied exactly once, like any write.
+  struct RangeSpec {
+    std::string lo;
+    std::string hi;
+    bool unbounded_hi = false;
+    bool empty = false;
+    uint64_t epoch = 0;
+  };
+  Status SetOwnedRange(const RangeSpec& spec);
+  Status Fence(const RangeSpec& spec);
+  // Bulk-loads key/value pairs, bypassing the ownership check.
+  Status Import(const std::vector<std::pair<std::string, std::string>>& pairs);
+
   // Applies every write atomically if every check holds; otherwise changes
   // nothing. One Raft round trip however many keys are involved.
   Result<BatchOutcome> Batch(const std::vector<BatchCheck>& checks,

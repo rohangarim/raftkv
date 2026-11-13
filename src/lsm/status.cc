@@ -21,6 +21,10 @@ std::string_view CodeName(Code code) {
       return "Unavailable";
     case Code::kTimedOut:
       return "TimedOut";
+    case Code::kWrongShard:
+      return "WrongShard";
+    case Code::kMoving:
+      return "Moving";
   }
   return "Unknown";
 }

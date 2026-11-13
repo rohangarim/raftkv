@@ -30,6 +30,8 @@ message Command {
     DeleteOp delete = 4;
     CasOp cas = 5;
     BatchCmd batch = 6;
+    RangeCmd range = 7;
+    ImportCmd import = 8;
   }
 }
 
@@ -49,6 +51,51 @@ message CasOp {
   // is how a caller expresses create-if-absent.
   optional bytes expected = 2;
   bytes new_value = 3;
+}
+
+// Shard ownership. A group serves one contiguous key range; these commands
+// change it, replicated like any write so every replica agrees on exactly which
+// writes were accepted before and after a handover.
+message RangeCmd {
+  enum Kind {
+    // Own exactly [lo, hi) from now on (or nothing, if `empty`). Also ends any
+    // fence, since the handover it was protecting is finished.
+    SET_OWNED = 0;
+    // Refuse writes to [lo, hi), which must lie inside the owned range, while
+    // reads continue. The range is being copied elsewhere.
+    FENCE = 1;
+  }
+  Kind kind = 1;
+  bytes lo = 2;
+  bytes hi = 3;
+  // Ignore `hi`: the range runs to the end of the key space.
+  bool unbounded_hi = 4;
+  // Own nothing at all.
+  bool empty = 5;
+  // Shard-map epoch this change belongs to. An older epoch than the last one
+  // applied is refused, so a stale coordinator cannot undo a newer handover.
+  uint64 epoch = 6;
+}
+
+// Bulk-loads copied data during a split. Bypasses ownership checks, because the
+// target does not own the range until the copy is complete.
+message ImportCmd {
+  repeated PutOp puts = 1;
+}
+
+// Persisted copy of the range state, kept in the state machine so it travels
+// with snapshots and survives restarts.
+message RangeState {
+  bool configured = 1;
+  bytes owned_lo = 2;
+  bytes owned_hi = 3;
+  bool owned_unbounded = 4;
+  bool owned_empty = 5;
+  bool fenced = 6;
+  bytes fence_lo = 7;
+  bytes fence_hi = 8;
+  bool fence_unbounded = 9;
+  uint64 epoch = 10;
 }
 
 // A condition on one key, evaluated against the state BEFORE the batch runs.
@@ -81,6 +128,9 @@ message CommandResult {
     NOT_FOUND = 1;
     CAS_MISMATCH = 2;
     INVALID = 3;
+    // The key is outside this group's range, or inside a fenced one.
+    WRONG_SHARD = 4;
+    MOVING = 5;
   }
   Code code = 1;
   // Present for reads and for a CAS that reports the value it found.
@@ -161,6 +211,23 @@ message KvPair {
   bytes value = 2;
 }
 
+message RangeRequest {
+  string client_id = 1;
+  uint64 seq = 2;
+  RangeCmd.Kind kind = 3;
+  bytes lo = 4;
+  bytes hi = 5;
+  bool unbounded_hi = 6;
+  bool empty = 7;
+  uint64 epoch = 8;
+}
+
+message ImportRequest {
+  string client_id = 1;
+  uint64 seq = 2;
+  repeated PutOp puts = 3;
+}
+
 message BatchRequest {
   string client_id = 1;
   uint64 seq = 2;
@@ -183,6 +250,12 @@ message KvResponse {
     // Gave up waiting. A write MAY have taken effect; retry with the same seq.
     TIMEOUT = 5;
     INVALID = 6;
+    // The key is not in the range this group owns. The client's shard map is
+    // stale: fetch a newer one and route again.
+    WRONG_SHARD = 7;
+    // The range is being handed to another group; writes are refused until the
+    // handover completes. Retry shortly.
+    MOVING = 8;
   }
   Code code = 1;
   optional bytes value = 2;
@@ -204,4 +277,7 @@ service Kv {
   rpc Batch(BatchRequest) returns (KvResponse);
   // Linearizable, like Get: confirmed through ReadIndex before it reads.
   rpc Scan(ScanRequest) returns (KvResponse);
+  // Shard administration, used by the split coordinator.
+  rpc Range(RangeRequest) returns (KvResponse);
+  rpc Import(ImportRequest) returns (KvResponse);
 }

@@ -71,6 +71,9 @@ class WatchingStateMachine final : public statemachine::StateMachine {
       const override {
     return lsm::Status::Ok();
   }
+  statemachine::RangeVerdict CheckRange(std::string_view, std::string_view, bool) const override {
+    return statemachine::RangeVerdict::kOk;
+  }
   lsm::Status Sync() override { return lsm::Status::Ok(); }
   lsm::Result<std::optional<std::string>> Get(std::string_view) const override {
     return std::optional<std::string>{};

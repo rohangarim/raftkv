@@ -22,6 +22,9 @@ using lsm::Result;
 using lsm::Status;
 
 // Outcome of applying one command.
+// Whether a key (or range of keys) belongs to this group.
+enum class RangeVerdict { kOk, kWrongShard, kMoving };
+
 struct ApplyResult {
   // Non-Ok means the command was malformed or could not be applied. It does
   // NOT mean "the operation reported a negative answer" -- a CAS that fails
@@ -33,6 +36,11 @@ struct ApplyResult {
 
   // The comparison failed; nothing was written.
   bool cas_mismatch = false;
+
+  // The command touched keys this group does not own (nothing was written), or
+  // keys inside a range that is being handed over.
+  bool wrong_shard = false;
+  bool moving = false;
 
   // For a batch whose precondition failed: which check, by position.
   std::optional<uint32_t> failed_check;
@@ -115,6 +123,12 @@ class StateMachine {
   // with no freshness guarantee of its own.
   virtual Status Scan(std::string_view start, std::string_view end, size_t limit,
                       const std::function<Status(std::string_view, std::string_view)>& fn) const = 0;
+
+  // Judges [start, end) against the owned range; an empty `end` means
+  // unbounded. With `write` set, a fenced range counts as kMoving. A point key
+  // is start == end.
+  virtual RangeVerdict CheckRange(std::string_view start, std::string_view end,
+                                  bool write) const = 0;
 
   // Makes everything applied so far durable.
   //

@@ -636,6 +636,12 @@ Status RaftDriver::AwaitReadPoint(std::chrono::steady_clock::time_point deadline
 Result<std::optional<std::string>> RaftDriver::LinearizableGet(std::string_view key,
                                                                std::chrono::milliseconds timeout) {
   RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
+  // Ownership is judged AFTER the read point: that is when this node's view of
+  // its range is guaranteed current, so a handover that completed before the
+  // read began is always seen.
+  if (state_machine_->CheckRange(key, key, false) != statemachine::RangeVerdict::kOk) {
+    return Status::WrongShard("key is not in this group's range");
+  }
   return state_machine_->Get(key);
 }
 
@@ -643,6 +649,9 @@ Status RaftDriver::LinearizableScan(
     std::string_view start, std::string_view end, size_t limit, std::chrono::milliseconds timeout,
     const std::function<Status(std::string_view, std::string_view)>& fn) {
   RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
+  if (state_machine_->CheckRange(start, end, false) != statemachine::RangeVerdict::kOk) {
+    return Status::WrongShard("scan range is not inside this group's range");
+  }
   return state_machine_->Scan(start, end, limit, fn);
 }
 
