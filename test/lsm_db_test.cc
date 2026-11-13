@@ -401,5 +401,139 @@ TEST_F(DbTest, RejectsAnEmptyDirectoryOption) {
   EXPECT_EQ(opened.GetStatus().ErrCode(), Code::kInvalidArgument);
 }
 
+// ---------------------------------------------------------------------------
+// Range scans
+// ---------------------------------------------------------------------------
+
+std::string ScanKey(int i) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "k%04d", i);
+  return buf;
+}
+
+std::vector<std::string> RunScan(DB* db, std::string_view start, std::string_view end,
+                                 size_t limit = 0, const Snapshot* snap = nullptr) {
+  std::vector<std::string> out;
+  const Status s = db->Scan(
+      start, end, limit,
+      [&out](std::string_view k, std::string_view v) {
+        out.push_back(std::string(k) + "=" + std::string(v));
+        return Status::Ok();
+      },
+      snap);
+  EXPECT_TRUE(s.IsOk()) << s.ToString();
+  return out;
+}
+
+TEST_F(DbTest, ScanReturnsTheRangeInOrder) {
+  OpenDb();
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(db_->Put(ScanKey(i), "v" + std::to_string(i)).IsOk());
+  }
+  const auto got = RunScan(db_.get(), ScanKey(10), ScanKey(15));
+  ASSERT_EQ(got.size(), 5U);
+  EXPECT_EQ(got.front(), "k0010=v10");
+  EXPECT_EQ(got.back(), "k0014=v14");
+}
+
+TEST_F(DbTest, ScanWithAnEmptyEndIsUnbounded) {
+  OpenDb();
+  for (int i = 0; i < 20; ++i) {
+    ASSERT_TRUE(db_->Put(ScanKey(i), "v").IsOk());
+  }
+  EXPECT_EQ(RunScan(db_.get(), ScanKey(15), "").size(), 5U);
+  EXPECT_EQ(RunScan(db_.get(), "", "").size(), 20U);
+}
+
+TEST_F(DbTest, ScanHonoursTheLimit) {
+  OpenDb();
+  for (int i = 0; i < 20; ++i) {
+    ASSERT_TRUE(db_->Put(ScanKey(i), "v").IsOk());
+  }
+  const auto got = RunScan(db_.get(), "", "", 3);
+  ASSERT_EQ(got.size(), 3U);
+  EXPECT_EQ(got.back(), "k0002=v");
+}
+
+TEST_F(DbTest, ScanSkipsDeletedAndShadowedKeys) {
+  OpenDb();
+  ASSERT_TRUE(db_->Put("a", "old").IsOk());
+  ASSERT_TRUE(db_->Put("b", "keep").IsOk());
+  ASSERT_TRUE(db_->Put("c", "gone").IsOk());
+  ASSERT_TRUE(db_->Put("a", "new").IsOk());
+  ASSERT_TRUE(db_->Delete("c").IsOk());
+  const auto got = RunScan(db_.get(), "", "");
+  ASSERT_EQ(got.size(), 2U);
+  EXPECT_EQ(got[0], "a=new");
+  EXPECT_EQ(got[1], "b=keep");
+}
+
+// The newest version has to win even when the versions live in different
+// places: an old value on disk, a newer one in the memtable, a tombstone over
+// a third.
+TEST_F(DbTest, ScanMergesTheMemtableWithTablesOnDisk) {
+  OpenDb();
+  for (int i = 0; i < 30; ++i) {
+    ASSERT_TRUE(db_->Put(ScanKey(i), "disk").IsOk());
+  }
+  ASSERT_TRUE(db_->FlushMemTable().IsOk());
+  ASSERT_TRUE(db_->Put(ScanKey(5), "mem").IsOk());
+  ASSERT_TRUE(db_->Delete(ScanKey(6)).IsOk());
+  ASSERT_TRUE(db_->Put(ScanKey(100), "mem-only").IsOk());
+
+  const auto got = RunScan(db_.get(), ScanKey(4), ScanKey(8));
+  ASSERT_EQ(got.size(), 3U);
+  EXPECT_EQ(got[0], "k0004=disk");
+  EXPECT_EQ(got[1], "k0005=mem");
+  EXPECT_EQ(got[2], "k0007=disk");
+  EXPECT_EQ(RunScan(db_.get(), ScanKey(100), "").size(), 1U);
+}
+
+TEST_F(DbTest, ScanAcrossLevelZeroAndLevelOne) {
+  OpenDb();
+  for (int round = 0; round < 3; ++round) {
+    for (int i = 0; i < 40; ++i) {
+      ASSERT_TRUE(db_->Put(ScanKey(i), "r" + std::to_string(round)).IsOk());
+    }
+    ASSERT_TRUE(db_->FlushMemTable().IsOk());
+  }
+  ASSERT_TRUE(db_->CompactRange().IsOk());
+  ASSERT_TRUE(db_->Put(ScanKey(7), "latest").IsOk());
+  ASSERT_TRUE(db_->FlushMemTable().IsOk());
+
+  const auto got = RunScan(db_.get(), ScanKey(6), ScanKey(9));
+  ASSERT_EQ(got.size(), 3U);
+  EXPECT_EQ(got[0], "k0006=r2");
+  EXPECT_EQ(got[1], "k0007=latest");
+  EXPECT_EQ(got[2], "k0008=r2");
+}
+
+TEST_F(DbTest, ScanThroughASnapshotSeesOnlyItsOwnState) {
+  OpenDb();
+  ASSERT_TRUE(db_->Put("a", "1").IsOk());
+  ASSERT_TRUE(db_->Put("b", "1").IsOk());
+  auto snapshot = db_->TakeSnapshot();
+  ASSERT_TRUE(db_->Put("a", "2").IsOk());
+  ASSERT_TRUE(db_->Put("c", "2").IsOk());
+  ASSERT_TRUE(db_->Delete("b").IsOk());
+
+  const auto old_view = RunScan(db_.get(), "", "", 0, snapshot.get());
+  ASSERT_EQ(old_view.size(), 2U);
+  EXPECT_EQ(old_view[0], "a=1");
+  EXPECT_EQ(old_view[1], "b=1");
+  const auto now = RunScan(db_.get(), "", "");
+  ASSERT_EQ(now.size(), 2U);
+  EXPECT_EQ(now[0], "a=2");
+  EXPECT_EQ(now[1], "c=2");
+}
+
+TEST_F(DbTest, ScanOfAnEmptyRangeVisitsNothing) {
+  OpenDb();
+  ASSERT_TRUE(db_->Put("m", "v").IsOk());
+  EXPECT_TRUE(RunScan(db_.get(), "n", "z").empty());
+  EXPECT_TRUE(RunScan(db_.get(), "m", "m").empty());
+}
+
+
 }  // namespace
 }  // namespace raftkv::lsm

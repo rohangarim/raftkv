@@ -123,6 +123,24 @@ Result<std::optional<std::string>> KvStateMachine::Get(std::string_view key) con
   return db_->Get(UserKey(key));
 }
 
+Status KvStateMachine::Scan(
+    std::string_view start, std::string_view end, size_t limit,
+    const std::function<Status(std::string_view, std::string_view)>& fn) const {
+  // User keys live under one prefix byte, so the scan stays inside that
+  // namespace and never surfaces metadata or session rows. An unbounded end
+  // becomes the first key past the whole namespace.
+  const std::string lo = UserKey(start);
+  std::string hi;
+  if (end.empty()) {
+    hi.push_back(static_cast<char>(kUserPrefix + 1));
+  } else {
+    hi = UserKey(end);
+  }
+  return db_->Scan(lo, hi, limit, [&fn](std::string_view key, std::string_view value) {
+    return fn(key.substr(1), value);
+  });
+}
+
 Result<std::optional<proto::SessionEntry>> KvStateMachine::LookupSession(
     const std::string& client_id) const {
   auto got = db_->Get(SessionKey(client_id));

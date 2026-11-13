@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -105,6 +106,12 @@ class StateMachine {
   // linearizable read must first obtain a read point from Raft (ReadIndex) and
   // wait until LastAppliedIndex covers it.
   virtual Result<std::optional<std::string>> Get(std::string_view key) const = 0;
+
+  // Visits user keys in [start, end) in ascending order, at most `limit` of
+  // them (0 = unlimited); an empty `end` is unbounded. Like Get, a local read
+  // with no freshness guarantee of its own.
+  virtual Status Scan(std::string_view start, std::string_view end, size_t limit,
+                      const std::function<Status(std::string_view, std::string_view)>& fn) const = 0;
 
   // Makes everything applied so far durable.
   //

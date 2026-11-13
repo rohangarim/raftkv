@@ -16,7 +16,7 @@ catches up from a snapshot instead of the log it no longer has.
 
 There are **no performance numbers yet**, because nothing has been benchmarked.
 When numbers show up here they'll link to raw output in `results/`. No file, no
-number. 213 tests, clang-tidy clean, green under ASan, UBSan and TSan, and the
+number. 224 tests, clang-tidy clean, green under ASan, UBSan and TSan, and the
 Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
 dropped, delayed and duplicated messages) checking all five safety invariants
 after every step. See [`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md) for what's

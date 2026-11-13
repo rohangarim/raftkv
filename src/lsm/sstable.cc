@@ -294,4 +294,9 @@ std::unique_ptr<SsTable::Iterator> SsTable::NewIterator() const {
   return std::make_unique<SsTableIteratorImpl>(file_.get(), 0, data_end_);
 }
 
+std::unique_ptr<SsTable::Iterator> SsTable::NewIteratorFrom(std::string_view user_key) const {
+  const std::string probe = MakeInternalKey(user_key, kMaxSequenceNumber, ValueType::kValue);
+  return std::make_unique<SsTableIteratorImpl>(file_.get(), SeekAnchor(probe), data_end_);
+}
+
 }  // namespace raftkv::lsm

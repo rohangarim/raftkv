@@ -122,6 +122,20 @@ message CasRequest {
   bytes new_value = 5;
 }
 
+message ScanRequest {
+  // Inclusive lower bound; empty means from the first key.
+  bytes start = 1;
+  // Exclusive upper bound; empty means no upper bound.
+  bytes end = 2;
+  // 0 asks for the server default. The server also enforces a ceiling.
+  uint32 limit = 3;
+}
+
+message KvPair {
+  bytes key = 1;
+  bytes value = 2;
+}
+
 message KvResponse {
   enum Code {
     OK = 0;
@@ -142,6 +156,9 @@ message KvResponse {
   optional bytes value = 2;
   string leader_address = 3;
   string message = 4;
+  // Scan: matching entries in key order, and whether more remain past them.
+  repeated KvPair pairs = 5;
+  bool more = 6;
 }
 
 service Kv {
@@ -149,4 +166,6 @@ service Kv {
   rpc Put(PutRequest) returns (KvResponse);
   rpc Delete(DeleteRequest) returns (KvResponse);
   rpc Cas(CasRequest) returns (KvResponse);
+  // Linearizable, like Get: confirmed through ReadIndex before it reads.
+  rpc Scan(ScanRequest) returns (KvResponse);
 }

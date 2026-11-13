@@ -48,6 +48,8 @@ class KvStateMachine final : public StateMachine {
   Result<std::unique_ptr<Snapshot>> TakeSnapshot(uint64_t index, uint64_t term) override;
   Status RestoreSnapshot(Snapshot& snapshot) override;
   uint64_t LastAppliedIndex() const override;
+  Status Scan(std::string_view start, std::string_view end, size_t limit,
+              const std::function<Status(std::string_view, std::string_view)>& fn) const override;
   Status Sync() override;
 
   // Direct read path, used by linearizable reads in Phase 4. Does not go

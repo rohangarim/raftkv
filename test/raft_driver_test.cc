@@ -66,6 +66,11 @@ class WatchingStateMachine final : public statemachine::StateMachine {
     const std::lock_guard<std::mutex> lock(mutex_);
     return last_index_;
   }
+  lsm::Status Scan(std::string_view, std::string_view, size_t,
+                   const std::function<lsm::Status(std::string_view, std::string_view)>&)
+      const override {
+    return lsm::Status::Ok();
+  }
   lsm::Status Sync() override { return lsm::Status::Ok(); }
   lsm::Result<std::optional<std::string>> Get(std::string_view) const override {
     return std::optional<std::string>{};

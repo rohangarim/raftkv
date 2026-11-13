@@ -34,6 +34,8 @@ class KvGrpcService final : public proto::Kv::Service {
                       proto::KvResponse* response) override;
   grpc::Status Cas(grpc::ServerContext* ctx, const proto::CasRequest* request,
                    proto::KvResponse* response) override;
+  grpc::Status Scan(grpc::ServerContext* ctx, const proto::ScanRequest* request,
+                    proto::KvResponse* response) override;
 
  private:
   // Never wait longer than the caller will: working on a request whose client

@@ -111,6 +111,41 @@ grpc::Status KvGrpcService::Get(grpc::ServerContext* ctx, const proto::GetReques
   return grpc::Status::OK;
 }
 
+grpc::Status KvGrpcService::Scan(grpc::ServerContext* ctx, const proto::ScanRequest* request,
+                                 proto::KvResponse* response) {
+  if (driver_ == nullptr) {
+    response->set_code(proto::KvResponse::UNAVAILABLE);
+    response->set_message("node is still starting");
+    return grpc::Status::OK;
+  }
+  constexpr uint32_t kDefaultLimit = 1000;
+  constexpr uint32_t kMaxLimit = 10000;
+  uint32_t limit = request->limit() == 0 ? kDefaultLimit : request->limit();
+  limit = std::min(limit, kMaxLimit);
+
+  // One past the limit, only to learn whether anything remains.
+  const lsm::Status s = driver_->LinearizableScan(
+      request->start(), request->end(), static_cast<size_t>(limit) + 1, TimeoutFor(ctx),
+      [&](std::string_view key, std::string_view value) {
+        if (static_cast<uint32_t>(response->pairs_size()) == limit) {
+          response->set_more(true);
+          return lsm::Status::Ok();
+        }
+        proto::KvPair* pair = response->add_pairs();
+        pair->set_key(std::string(key));
+        pair->set_value(std::string(value));
+        return lsm::Status::Ok();
+      });
+  if (!s.IsOk()) {
+    response->clear_pairs();
+    response->clear_more();
+    FillFromStatus(s, response);
+    return grpc::Status::OK;
+  }
+  response->set_code(proto::KvResponse::OK);
+  return grpc::Status::OK;
+}
+
 grpc::Status KvGrpcService::Put(grpc::ServerContext* ctx, const proto::PutRequest* request,
                                 proto::KvResponse* response) {
   proto::Command command;

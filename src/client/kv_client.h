@@ -61,6 +61,13 @@ struct ClientOptions {
   uint64_t jitter_seed = 0;
 };
 
+struct ScanPage {
+  std::vector<std::pair<std::string, std::string>> pairs;
+  // True when the range holds more past `pairs`; continue from just after the
+  // last key returned.
+  bool more = false;
+};
+
 struct CasOutcome {
   // True if the swap happened. False means the comparison failed: the
   // operation was applied and the answer is no.
@@ -78,6 +85,9 @@ class KvClient {
   Status Put(std::string_view key, std::string_view value);
   Status Delete(std::string_view key);
   // `expected == nullopt` means "only if the key does not exist".
+  // One page of [start, end) in key order. An empty `end` is unbounded; `limit`
+  // 0 takes the server default.
+  Result<ScanPage> Scan(std::string_view start, std::string_view end, uint32_t limit = 0);
   Result<CasOutcome> Cas(std::string_view key, std::optional<std::string> expected,
                          std::string_view new_value);
 

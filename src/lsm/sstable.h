@@ -112,6 +112,11 @@ class SsTable {
 
   std::unique_ptr<Iterator> NewIterator() const;
 
+  // Starts at the index anchor at or before `user_key`, so a range scan reads
+  // from near its start instead of from the top of the file. The caller still
+  // skips entries below `user_key`: an anchor is only a lower bound.
+  std::unique_ptr<Iterator> NewIteratorFrom(std::string_view user_key) const;
+
   const std::filesystem::path& Path() const { return file_->Path(); }
   uint64_t FileSize() const { return file_->Size(); }
   uint64_t NumIndexEntries() const { return index_.size(); }

@@ -117,6 +117,12 @@ class RaftDriver {
                                                      std::chrono::milliseconds timeout);
 
   // Address of a peer (or self), for building a redirect. Empty if unknown.
+  // A linearizable range read, with the same guarantee as LinearizableGet:
+  // leadership is confirmed and the state machine caught up before it reads.
+  Status LinearizableScan(std::string_view start, std::string_view end, size_t limit,
+                          std::chrono::milliseconds timeout,
+                          const std::function<Status(std::string_view, std::string_view)>& fn);
+
   std::string AddressOf(uint64_t node_id) const;
 
   // Highest Raft index the driver has fully processed, including entries that
@@ -192,6 +198,10 @@ class RaftDriver {
   void ApplyBatch(const std::vector<proto::Entry>& entries);
   void ResolveReads(const std::vector<raft::ReadState>& states,
                     const std::vector<std::string>& dropped);
+
+  // Confirms leadership for a read and waits for the state machine to reach
+  // the read point; both Get and Scan then read locally.
+  Status AwaitReadPoint(std::chrono::steady_clock::time_point deadline);
 
   proto::Raft::Stub* StubFor(uint64_t peer);
 

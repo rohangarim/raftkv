@@ -199,6 +199,29 @@ Result<std::optional<std::string>> KvClient::Get(std::string_view key) {
   return std::optional<std::string>{response.value()};
 }
 
+Result<ScanPage> KvClient::Scan(std::string_view start, std::string_view end, uint32_t limit) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::ScanRequest request;
+  request.set_start(std::string(start));
+  request.set_end(std::string(end));
+  request.set_limit(limit);
+
+  proto::KvResponse response;
+  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                               proto::KvResponse* out) { return stub->Scan(ctx, request, out); },
+                           &response);
+  if (!s.IsOk()) {
+    return s;
+  }
+  ScanPage page;
+  page.more = response.more();
+  page.pairs.reserve(static_cast<size_t>(response.pairs_size()));
+  for (const auto& pair : response.pairs()) {
+    page.pairs.emplace_back(pair.key(), pair.value());
+  }
+  return page;
+}
+
 Status KvClient::Put(std::string_view key, std::string_view value) {
   const std::lock_guard<std::mutex> op_lock(op_mutex_);
   proto::PutRequest request;

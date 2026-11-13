@@ -120,6 +120,18 @@ class DB {
   // Merges every L0 table and L1 into a single new L1 table.
   Status CompactRange();
 
+  // Visits live keys in [start, end), in ascending order, stopping after
+  // `limit` of them (0 means no limit). An empty `end` is unbounded. Newer
+  // versions shadow older ones and deleted keys are skipped, as with Get.
+  //
+  // Reads the memtable and every table without flushing or compacting
+  // anything. It materialises the matching entries from each source before
+  // merging them, so memory is proportional to the range plus its shadowed
+  // versions, not to the database.
+  Status Scan(std::string_view start, std::string_view end, size_t limit,
+              const std::function<Status(std::string_view key, std::string_view value)>& fn,
+              const Snapshot* snapshot = nullptr) const;
+
   // Visits every live key exactly once, in ascending user-key order, skipping
   // deleted keys.
   //

@@ -579,9 +579,7 @@ Result<statemachine::ApplyResult> RaftDriver::ProposeAndWait(std::span<const std
   return std::move(waiter.result);
 }
 
-Result<std::optional<std::string>> RaftDriver::LinearizableGet(std::string_view key,
-                                                               std::chrono::milliseconds timeout) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
+Status RaftDriver::AwaitReadPoint(std::chrono::steady_clock::time_point deadline) {
   // The epoch keeps a context unique across restarts of this driver, so a
   // delayed heartbeat ack from a previous life can never match a new read.
   const std::string context = "r" + read_epoch_ + "." + std::to_string(read_counter_.fetch_add(1));
@@ -598,12 +596,12 @@ Result<std::optional<std::string>> RaftDriver::LinearizableGet(std::string_view 
   DrainedReady drained;
   {
     const std::lock_guard<std::mutex> lock(mutex_);
-    const Status s = node_->ReadIndex(context);
+    Status s = node_->ReadIndex(context);
     if (!s.IsOk()) {
       forget();
       return s;
     }
-    const Status persisted = DrainAndPersist(&drained);
+    Status persisted = DrainAndPersist(&drained);
     if (!persisted.IsOk()) {
       forget();
       return persisted;
@@ -632,7 +630,20 @@ Result<std::optional<std::string>> RaftDriver::LinearizableGet(std::string_view 
       return Status::TimedOut("timed out waiting for the state machine to reach the read point");
     }
   }
+  return Status::Ok();
+}
+
+Result<std::optional<std::string>> RaftDriver::LinearizableGet(std::string_view key,
+                                                               std::chrono::milliseconds timeout) {
+  RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
   return state_machine_->Get(key);
+}
+
+Status RaftDriver::LinearizableScan(
+    std::string_view start, std::string_view end, size_t limit, std::chrono::milliseconds timeout,
+    const std::function<Status(std::string_view, std::string_view)>& fn) {
+  RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
+  return state_machine_->Scan(start, end, limit, fn);
 }
 
 std::string RaftDriver::AddressOf(uint64_t node_id) const {

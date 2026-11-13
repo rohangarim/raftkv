@@ -468,6 +468,85 @@ Status DB::CompactRange() {
   return Status::Ok();
 }
 
+Status DB::Scan(std::string_view start, std::string_view end, size_t limit,
+                const std::function<Status(std::string_view key, std::string_view value)>& fn,
+                const Snapshot* snapshot) const {
+  SequenceNumber sequence;
+  std::vector<std::shared_ptr<SsTable>> tables;
+  std::vector<std::pair<std::string, std::string>> candidates;
+
+  auto in_range = [&](std::string_view user_key) {
+    return user_key >= start && (end.empty() || user_key < end);
+  };
+
+  {
+    const std::shared_lock<std::shared_mutex> read_state(state_mutex_);
+    sequence = snapshot != nullptr ? snapshot->Sequence() : last_sequence_;
+    tables = l0_;
+    if (l1_ != nullptr) {
+      tables.push_back(l1_);
+    }
+    const std::string probe = MakeInternalKey(start, kMaxSequenceNumber, ValueType::kValue);
+    for (auto it = mem_->Entries().lower_bound(probe); it != mem_->Entries().end(); ++it) {
+      const std::string_view user_key = UserKeyOf(it->first);
+      if (!end.empty() && user_key >= end) {
+        break;
+      }
+      if (SequenceOf(PackedOf(it->first)) <= sequence) {
+        candidates.emplace_back(it->first, it->second);
+      }
+    }
+  }
+
+  for (const auto& table : tables) {
+    auto it = table->NewIteratorFrom(start);
+    while (true) {
+      std::string_view internal_key;
+      std::string_view value;
+      const Status s = it->Next(&internal_key, &value);
+      if (s.ErrCode() == Code::kNotFound) {
+        break;
+      }
+      RAFTKV_RETURN_IF_ERROR(s);
+      if (!IsValidInternalKey(internal_key)) {
+        return Status::Corruption("scan: record key shorter than its tag");
+      }
+      const std::string_view user_key = UserKeyOf(internal_key);
+      if (!end.empty() && user_key >= end) {
+        break;  // tables are sorted, nothing later can be in range
+      }
+      if (in_range(user_key) && SequenceOf(PackedOf(internal_key)) <= sequence) {
+        candidates.emplace_back(std::string(internal_key), std::string(value));
+      }
+    }
+  }
+
+  // User key ascending, newest version first: the first entry per key wins.
+  const InternalKeyComparator cmp;
+  std::stable_sort(candidates.begin(), candidates.end(),
+                   [&cmp](const auto& a, const auto& b) { return cmp(a.first, b.first); });
+
+  size_t emitted = 0;
+  std::string_view previous;
+  bool have_previous = false;
+  for (const auto& [internal_key, value] : candidates) {
+    const std::string_view user_key = UserKeyOf(internal_key);
+    if (have_previous && user_key == previous) {
+      continue;  // an older version of a key already handled
+    }
+    previous = user_key;
+    have_previous = true;
+    if (TypeOf(PackedOf(internal_key)) == ValueType::kDeletion) {
+      continue;
+    }
+    RAFTKV_RETURN_IF_ERROR(fn(user_key, value));
+    if (limit != 0 && ++emitted >= limit) {
+      break;
+    }
+  }
+  return Status::Ok();
+}
+
 Status DB::ScanAll(const std::function<Status(std::string_view key, std::string_view value)>& fn) {
   RAFTKV_RETURN_IF_ERROR(FlushMemTable());
 

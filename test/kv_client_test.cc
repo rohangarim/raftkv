@@ -306,5 +306,64 @@ TEST_F(KvClientTest, ConcurrentClientsAlwaysReadTheirOwnWrites) {
   EXPECT_EQ(violations.load(), 0) << "a read missed a write that had already been acknowledged";
 }
 
+TEST_F(KvClientTest, ScanReturnsARangeInOrderOverRealGrpc) {
+  StartCluster({1, 2, 3});
+  ASSERT_NE(WaitForLeader(), 0U);
+  KvClient client(Options(AllAddresses()));
+
+  for (int i = 0; i < 20; ++i) {
+    char key[16];
+    std::snprintf(key, sizeof(key), "row%03d", i);
+    ASSERT_TRUE(client.Put(key, "v" + std::to_string(i)).IsOk());
+  }
+  ASSERT_TRUE(client.Delete("row005").IsOk());
+
+  auto page = client.Scan("row003", "row008");
+  ASSERT_TRUE(page.IsOk()) << page.GetStatus().ToString();
+  ASSERT_EQ(page->pairs.size(), 4U);  // 003, 004, 006, 007; 005 was deleted
+  EXPECT_EQ(page->pairs.front().first, "row003");
+  EXPECT_EQ(page->pairs.back().first, "row007");
+  EXPECT_FALSE(page->more);
+}
+
+TEST_F(KvClientTest, ScanPagesThroughALargeRange) {
+  StartCluster({1, 2, 3});
+  ASSERT_NE(WaitForLeader(), 0U);
+  KvClient client(Options(AllAddresses()));
+  for (int i = 0; i < 25; ++i) {
+    char key[16];
+    std::snprintf(key, sizeof(key), "p%03d", i);
+    ASSERT_TRUE(client.Put(key, "v").IsOk());
+  }
+
+  std::string cursor;
+  size_t total = 0;
+  int pages = 0;
+  while (true) {
+    auto page = client.Scan(cursor, "", 10);
+    ASSERT_TRUE(page.IsOk()) << page.GetStatus().ToString();
+    total += page->pairs.size();
+    ++pages;
+    if (!page->more) {
+      break;
+    }
+    cursor = page->pairs.back().first + '\0';  // just past the last key seen
+    ASSERT_LT(pages, 10) << "paging never finished";
+  }
+  EXPECT_EQ(total, 25U);
+  EXPECT_EQ(pages, 3);
+}
+
+TEST_F(KvClientTest, ScanDoesNotSeeSessionOrMetadataRows) {
+  StartCluster({1, 2, 3});
+  ASSERT_NE(WaitForLeader(), 0U);
+  KvClient client(Options(AllAddresses(), "scan-client"));
+  ASSERT_TRUE(client.Put("only", "one").IsOk());
+  auto page = client.Scan("", "");
+  ASSERT_TRUE(page.IsOk());
+  ASSERT_EQ(page->pairs.size(), 1U);
+  EXPECT_EQ(page->pairs[0].first, "only");
+}
+
 }  // namespace
 }  // namespace raftkv::client
