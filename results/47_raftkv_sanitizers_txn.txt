@@ -1,0 +1,43 @@
+# raftkv sanitizer status after batching, shard split and transactions
+# recorded: 2026-11-13T05:41:48Z
+# git: d7afac9
+# command: ./scripts/ci.sh asan ubsan tsan
+
+== preset: asan
+        Start 124: StateMachineTest.BatchWithAFailedCheckWritesNothing
+124/295 Test #124: StateMachineTest.BatchWithAFailedCheckWritesNothing ................................   Passed    0.05 sec
+        Start 129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck
+129/295 Test #129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck ..................   Passed    0.05 sec
+261/295 Test #261: RaftInflightTest.ASilentPeerIsCappedAndTheClusterStillCommits ......................***Failed   18.18 sec
+99% tests passed, 1 tests failed out of 295
+	261 - RaftInflightTest.ASilentPeerIsCappedAndTheClusterStillCommits (Failed)
+== preset: ubsan
+        Start 124: StateMachineTest.BatchWithAFailedCheckWritesNothing
+124/295 Test #124: StateMachineTest.BatchWithAFailedCheckWritesNothing ................................   Passed    0.01 sec
+        Start 129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck
+129/295 Test #129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck ..................   Passed    0.01 sec
+100% tests passed out of 295
+== preset: tsan
+        Start 124: StateMachineTest.BatchWithAFailedCheckWritesNothing
+124/295 Test #124: StateMachineTest.BatchWithAFailedCheckWritesNothing ................................   Passed    0.14 sec
+        Start 129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck
+129/295 Test #129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck ..................   Passed    0.14 sec
+100% tests passed out of 295
+# done
+
+# NOTE (added after the run): the single ASan failure above,
+# RaftInflightTest.ASilentPeerIsCappedAndTheClusterStillCommits, is a timing-
+# sensitive test (it sleeps 800 ms and then needs a commit inside 5 s) that
+# failed once under load in the full run. It passed 5 of 5 times run alone under
+# ASan, and the whole ASan preset passed 295/295 on an immediate rerun, shown
+# below. I have not found a root cause, so treat it as a known flaky test rather
+# than a fixed one.
+
+# ---- ASan rerun ----
+== preset: asan
+        Start 124: StateMachineTest.BatchWithAFailedCheckWritesNothing
+124/295 Test #124: StateMachineTest.BatchWithAFailedCheckWritesNothing ................................   Passed    0.04 sec
+        Start 129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck
+129/295 Test #129: StateMachineTest.ReplayedBatchAppliesOnceAndRemembersAFailedCheck ..................   Passed    0.04 sec
+100% tests passed out of 295
+# done
