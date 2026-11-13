@@ -68,6 +68,28 @@ struct ScanPage {
   bool more = false;
 };
 
+struct BatchCheck {
+  std::string key;
+  // nullopt means the key must not exist.
+  std::optional<std::string> expected;
+};
+
+struct BatchWrite {
+  std::string key;
+  // nullopt deletes the key.
+  std::optional<std::string> value;
+};
+
+struct BatchOutcome {
+  bool applied = false;
+  // When not applied: the position of the first precondition that failed.
+  std::optional<size_t> failed_check;
+  // Only set by ShardedClient: positions (in the caller's `writes`) that were
+  // durably applied. Non-empty alongside applied=false means a multi-shard
+  // batch got partway before a later shard refused.
+  std::vector<size_t> applied_writes;
+};
+
 struct CasOutcome {
   // True if the swap happened. False means the comparison failed: the
   // operation was applied and the answer is no.
@@ -88,6 +110,10 @@ class KvClient {
   // One page of [start, end) in key order. An empty `end` is unbounded; `limit`
   // 0 takes the server default.
   Result<ScanPage> Scan(std::string_view start, std::string_view end, uint32_t limit = 0);
+  // Applies every write atomically if every check holds; otherwise changes
+  // nothing. One Raft round trip however many keys are involved.
+  Result<BatchOutcome> Batch(const std::vector<BatchCheck>& checks,
+                             const std::vector<BatchWrite>& writes);
   Result<CasOutcome> Cas(std::string_view key, std::optional<std::string> expected,
                          std::string_view new_value);
 

@@ -20,6 +20,9 @@ ApplyResult ResultFromCached(const proto::CommandResult& cached) {
     case proto::CommandResult::CAS_MISMATCH:
       out.status = Status::Ok();
       out.cas_mismatch = true;
+      if (cached.has_failed_check()) {
+        out.failed_check = cached.failed_check();
+      }
       break;
     case proto::CommandResult::NOT_FOUND:
       out.status = Status::Ok();
@@ -56,6 +59,9 @@ proto::CommandResult CacheableResult(const ApplyResult& result) {
                                       : proto::CommandResult::OK);
   if (result.value.has_value()) {
     cached.set_value(*result.value);
+  }
+  if (result.failed_check.has_value()) {
+    cached.set_failed_check(*result.failed_check);
   }
   return cached;
 }
@@ -195,6 +201,46 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
         return result;
       }
       batch->Put(UserKey(cas.key()), cas.new_value());
+      result.status = Status::Ok();
+      return result;
+    }
+
+    case proto::Command::kBatch: {
+      const auto& cmd = command.batch();
+      if (cmd.ops_size() == 0 && cmd.checks_size() == 0) {
+        result.status = Status::InvalidArgument("an empty batch does nothing");
+        return result;
+      }
+      // Checks see the state as it was before this batch, never its own
+      // writes, so the outcome does not depend on the order of ops.
+      for (int i = 0; i < cmd.checks_size(); ++i) {
+        const auto& check = cmd.checks(i);
+        auto current = db_->Get(UserKey(check.key()));
+        if (!current.IsOk()) {
+          result.status = current.GetStatus();
+          return result;
+        }
+        const std::optional<std::string>& observed = *current;
+        const bool holds = check.has_expected()
+                               ? (observed.has_value() && *observed == check.expected())
+                               : !observed.has_value();
+        if (!holds) {
+          result.status = Status::Ok();
+          result.cas_mismatch = true;
+          result.failed_check = static_cast<uint32_t>(i);
+          return result;
+        }
+      }
+      for (const auto& op : cmd.ops()) {
+        if (op.op_case() == proto::BatchOp::kPut) {
+          batch->Put(UserKey(op.put().key()), op.put().value());
+        } else if (op.op_case() == proto::BatchOp::kDelete) {
+          batch->Delete(UserKey(op.delete_().key()));
+        } else {
+          result.status = Status::InvalidArgument("batch operation has no kind");
+          return result;
+        }
+      }
       result.status = Status::Ok();
       return result;
     }

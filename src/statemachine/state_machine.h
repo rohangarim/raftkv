@@ -34,6 +34,9 @@ struct ApplyResult {
   // The comparison failed; nothing was written.
   bool cas_mismatch = false;
 
+  // For a batch whose precondition failed: which check, by position.
+  std::optional<uint32_t> failed_check;
+
   // The command was a repeat of one already applied, and this result came from
   // the session cache rather than from applying it a second time.
   bool deduplicated = false;

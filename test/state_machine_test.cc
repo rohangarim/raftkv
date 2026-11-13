@@ -59,6 +59,35 @@ std::string EncodeCas(const std::string& client, uint64_t seq, const std::string
   return c.SerializeAsString();
 }
 
+struct BatchSpec {
+  std::vector<std::pair<std::string, std::optional<std::string>>> checks;  // key, expected
+  std::vector<std::pair<std::string, std::optional<std::string>>> writes;  // key, value (nullopt = delete)
+};
+
+std::string EncodeBatch(const std::string& client, uint64_t seq, const BatchSpec& spec) {
+  proto::Command c;
+  c.set_client_id(client);
+  c.set_seq(seq);
+  auto* batch = c.mutable_batch();
+  for (const auto& [key, expected] : spec.checks) {
+    auto* check = batch->add_checks();
+    check->set_key(key);
+    if (expected.has_value()) {
+      check->set_expected(*expected);
+    }
+  }
+  for (const auto& [key, value] : spec.writes) {
+    auto* op = batch->add_ops();
+    if (value.has_value()) {
+      op->mutable_put()->set_key(key);
+      op->mutable_put()->set_value(*value);
+    } else {
+      op->mutable_delete_()->set_key(key);
+    }
+  }
+  return c.SerializeAsString();
+}
+
 class StateMachineTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -472,4 +501,85 @@ TEST_F(StateMachineTest, RecoversAppliedIndexAcrossRestart) {
 }
 
 }  // namespace
+// ---------------------------------------------------------------------------
+// Batches
+// ---------------------------------------------------------------------------
+
+TEST_F(StateMachineTest, BatchAppliesEveryWriteTogether) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "gone", "x")).status.IsOk());
+  const auto r = Apply(2, EncodeBatch("c", 2, {{}, {{"a", "1"}, {"b", "2"}, {"gone", std::nullopt}}}));
+  ASSERT_TRUE(r.status.IsOk());
+  EXPECT_FALSE(r.cas_mismatch);
+  EXPECT_EQ(Get("a"), "1");
+  EXPECT_EQ(Get("b"), "2");
+  EXPECT_FALSE(Get("gone").has_value());
+}
+
+TEST_F(StateMachineTest, BatchWithAFailedCheckWritesNothing) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "taken", "mine")).status.IsOk());
+  const auto r = Apply(2, EncodeBatch("c", 2, {{{"free", std::nullopt}, {"taken", std::nullopt}},
+                                                {{"free", "1"}, {"other", "2"}}}));
+  ASSERT_TRUE(r.status.IsOk());
+  EXPECT_TRUE(r.cas_mismatch);
+  ASSERT_TRUE(r.failed_check.has_value());
+  EXPECT_EQ(*r.failed_check, 1U);  // the second check, on "taken"
+  EXPECT_FALSE(Get("free").has_value());
+  EXPECT_FALSE(Get("other").has_value());
+  EXPECT_EQ(Get("taken"), "mine");
+}
+
+TEST_F(StateMachineTest, BatchChecksCompareValues) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "k", "v1")).status.IsOk());
+  EXPECT_TRUE(Apply(2, EncodeBatch("c", 2, {{{"k", "v1"}}, {{"k", "v2"}}})).status.IsOk());
+  EXPECT_EQ(Get("k"), "v2");
+  const auto stale = Apply(3, EncodeBatch("c", 3, {{{"k", "v1"}}, {{"k", "v3"}}}));
+  EXPECT_TRUE(stale.cas_mismatch);
+  EXPECT_EQ(Get("k"), "v2");
+}
+
+// Checks look at the state before the batch, so a batch cannot satisfy its own
+// precondition and the outcome never depends on the order of its operations.
+TEST_F(StateMachineTest, BatchChecksIgnoreTheBatchsOwnWrites) {
+  const auto r = Apply(1, EncodeBatch("c", 1, {{{"k", "from-the-batch"}}, {{"k", "from-the-batch"}}}));
+  EXPECT_TRUE(r.cas_mismatch);
+  EXPECT_FALSE(Get("k").has_value());
+}
+
+TEST_F(StateMachineTest, ALaterOpInABatchOverridesAnEarlierOneOnTheSameKey) {
+  ASSERT_TRUE(Apply(1, EncodeBatch("c", 1, {{}, {{"k", "first"}, {"k", "second"}}})).status.IsOk());
+  EXPECT_EQ(Get("k"), "second");
+  ASSERT_TRUE(Apply(2, EncodeBatch("c", 2, {{}, {{"k", "again"}, {"k", std::nullopt}}})).status.IsOk());
+  EXPECT_FALSE(Get("k").has_value());
+}
+
+TEST_F(StateMachineTest, EmptyBatchIsRejectedButACheckOnlyBatchIsValid) {
+  EXPECT_FALSE(Apply(1, EncodeBatch("c", 1, {})).status.IsOk());
+  const auto ok = Apply(2, EncodeBatch("c", 2, {{{"absent", std::nullopt}}, {}}));
+  EXPECT_TRUE(ok.status.IsOk());
+  EXPECT_FALSE(ok.cas_mismatch);
+}
+
+TEST_F(StateMachineTest, ReplayedBatchAppliesOnceAndRemembersAFailedCheck) {
+  ASSERT_TRUE(Apply(1, EncodePut("c0", 1, "taken", "x")).status.IsOk());
+  const std::string cmd = EncodeBatch("c", 1, {{{"taken", std::nullopt}}, {{"w", "1"}}});
+  const auto first = Apply(2, cmd);
+  ASSERT_TRUE(first.cas_mismatch);
+  // The key is later freed; a retry of the same sequence must still report the
+  // original refusal rather than re-evaluating.
+  ASSERT_TRUE(Apply(3, EncodeDelete("c0", 2, "taken")).status.IsOk());
+  const auto retry = Apply(4, cmd);
+  EXPECT_TRUE(retry.deduplicated);
+  EXPECT_TRUE(retry.cas_mismatch);
+  ASSERT_TRUE(retry.failed_check.has_value());
+  EXPECT_EQ(*retry.failed_check, 0U);
+  EXPECT_FALSE(Get("w").has_value());
+}
+
+TEST_F(StateMachineTest, BatchSurvivesAReopen) {
+  ASSERT_TRUE(Apply(1, EncodeBatch("c", 1, {{}, {{"x", "1"}, {"y", "2"}}})).status.IsOk());
+  Open();
+  EXPECT_EQ(Get("x"), "1");
+  EXPECT_EQ(Get("y"), "2");
+}
+
 }  // namespace raftkv::statemachine

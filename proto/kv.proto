@@ -29,6 +29,7 @@ message Command {
     PutOp put = 3;
     DeleteOp delete = 4;
     CasOp cas = 5;
+    BatchCmd batch = 6;
   }
 }
 
@@ -50,6 +51,28 @@ message CasOp {
   bytes new_value = 3;
 }
 
+// A condition on one key, evaluated against the state BEFORE the batch runs.
+message BatchCheck {
+  bytes key = 1;
+  // Absent `expected` means the key must not exist.
+  optional bytes expected = 2;
+}
+
+message BatchOp {
+  oneof op {
+    PutOp put = 1;
+    DeleteOp delete = 2;
+  }
+}
+
+// Several writes applied as one log entry: every check passes and every op
+// lands, or nothing changes. One Raft round trip however many keys it touches,
+// which is what makes bulk writes affordable.
+message BatchCmd {
+  repeated BatchCheck checks = 1;
+  repeated BatchOp ops = 2;
+}
+
 // The outcome of applying one Command. Cached in the session table so a
 // retried command returns the same answer it did the first time.
 message CommandResult {
@@ -62,6 +85,8 @@ message CommandResult {
   Code code = 1;
   // Present for reads and for a CAS that reports the value it found.
   optional bytes value = 2;
+  // Batch: index of the first check that failed, when code is CAS_MISMATCH.
+  optional uint32 failed_check = 3;
 }
 
 // Persisted per-client session entry.
@@ -136,6 +161,13 @@ message KvPair {
   bytes value = 2;
 }
 
+message BatchRequest {
+  string client_id = 1;
+  uint64 seq = 2;
+  repeated BatchCheck checks = 3;
+  repeated BatchOp ops = 4;
+}
+
 message KvResponse {
   enum Code {
     OK = 0;
@@ -159,6 +191,8 @@ message KvResponse {
   // Scan: matching entries in key order, and whether more remain past them.
   repeated KvPair pairs = 5;
   bool more = 6;
+  // Batch: which check failed, when code is CAS_MISMATCH.
+  optional uint32 failed_check = 7;
 }
 
 service Kv {
@@ -166,6 +200,8 @@ service Kv {
   rpc Put(PutRequest) returns (KvResponse);
   rpc Delete(DeleteRequest) returns (KvResponse);
   rpc Cas(CasRequest) returns (KvResponse);
+  // Atomic multi-key write with optional preconditions, in one Raft entry.
+  rpc Batch(BatchRequest) returns (KvResponse);
   // Linearizable, like Get: confirmed through ReadIndex before it reads.
   rpc Scan(ScanRequest) returns (KvResponse);
 }

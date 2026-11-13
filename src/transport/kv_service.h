@@ -34,6 +34,8 @@ class KvGrpcService final : public proto::Kv::Service {
                       proto::KvResponse* response) override;
   grpc::Status Cas(grpc::ServerContext* ctx, const proto::CasRequest* request,
                    proto::KvResponse* response) override;
+  grpc::Status Batch(grpc::ServerContext* ctx, const proto::BatchRequest* request,
+                     proto::KvResponse* response) override;
   grpc::Status Scan(grpc::ServerContext* ctx, const proto::ScanRequest* request,
                     proto::KvResponse* response) override;
 

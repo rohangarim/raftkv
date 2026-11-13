@@ -39,6 +39,53 @@ Result<CasOutcome> ShardedClient::Cas(std::string_view key, std::optional<std::s
   return ClientFor(map_.Lookup(key))->Cas(key, std::move(expected), new_value);
 }
 
+Result<BatchOutcome> ShardedClient::Batch(const std::vector<BatchCheck>& checks,
+                                          const std::vector<BatchWrite>& writes) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  struct Group {
+    const shard::ShardRange* range = nullptr;
+    std::vector<BatchCheck> checks;
+    std::vector<size_t> check_index;
+    std::vector<BatchWrite> writes;
+    std::vector<size_t> write_index;
+  };
+  std::map<uint32_t, Group> groups;
+  for (size_t i = 0; i < checks.size(); ++i) {
+    const shard::ShardRange& r = map_.Lookup(checks[i].key);
+    Group& g = groups[r.shard_id];
+    g.range = &r;
+    g.checks.push_back(checks[i]);
+    g.check_index.push_back(i);
+  }
+  for (size_t i = 0; i < writes.size(); ++i) {
+    const shard::ShardRange& r = map_.Lookup(writes[i].key);
+    Group& g = groups[r.shard_id];
+    g.range = &r;
+    g.writes.push_back(writes[i]);
+    g.write_index.push_back(i);
+  }
+
+  BatchOutcome outcome;
+  for (auto& [id, group] : groups) {
+    auto result = ClientFor(*group.range)->Batch(group.checks, group.writes);
+    if (!result.IsOk()) {
+      return result.GetStatus();
+    }
+    if (!result->applied) {
+      outcome.applied = false;
+      const std::optional<size_t> failed = result->failed_check;
+      if (failed.has_value()) {
+        outcome.failed_check = group.check_index[failed.value()];
+      }
+      return outcome;
+    }
+    outcome.applied_writes.insert(outcome.applied_writes.end(), group.write_index.begin(),
+                                  group.write_index.end());
+  }
+  outcome.applied = true;
+  return outcome;
+}
+
 Result<ScanPage> ShardedClient::Scan(std::string_view start, std::string_view end, size_t limit) {
   std::lock_guard<std::mutex> lock(mutex_);
   ScanPage out;

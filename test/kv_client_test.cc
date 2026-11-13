@@ -365,5 +365,40 @@ TEST_F(KvClientTest, ScanDoesNotSeeSessionOrMetadataRows) {
   EXPECT_EQ(page->pairs[0].first, "only");
 }
 
+TEST_F(KvClientTest, BatchWritesManyKeysAtomicallyOverRealGrpc) {
+  StartCluster({1, 2, 3});
+  ASSERT_NE(WaitForLeader(), 0U);
+  KvClient client(Options(AllAddresses()));
+
+  std::vector<BatchWrite> writes;
+  writes.reserve(100);
+  for (int i = 0; i < 100; ++i) {
+    writes.push_back({"b" + std::to_string(i), "v" + std::to_string(i)});
+  }
+  auto outcome = client.Batch({}, writes);
+  ASSERT_TRUE(outcome.IsOk()) << outcome.GetStatus().ToString();
+  EXPECT_TRUE(outcome->applied);
+  auto got = client.Get("b57");
+  ASSERT_TRUE(got.IsOk() && got->has_value());
+  EXPECT_EQ(**got, "v57");
+}
+
+TEST_F(KvClientTest, BatchPreconditionFailureChangesNothing) {
+  StartCluster({1, 2, 3});
+  ASSERT_NE(WaitForLeader(), 0U);
+  KvClient client(Options(AllAddresses()));
+  ASSERT_TRUE(client.Put("exists", "1").IsOk());
+
+  auto outcome = client.Batch({{"new", std::nullopt}, {"exists", std::nullopt}},
+                              {{"new", "x"}, {"other", "y"}});
+  ASSERT_TRUE(outcome.IsOk());
+  EXPECT_FALSE(outcome->applied);
+  ASSERT_TRUE(outcome->failed_check.has_value());
+  EXPECT_EQ(*outcome->failed_check, 1U);
+  auto probe = client.Get("other");
+  ASSERT_TRUE(probe.IsOk());
+  EXPECT_FALSE(probe->has_value());
+}
+
 }  // namespace
 }  // namespace raftkv::client

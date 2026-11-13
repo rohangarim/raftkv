@@ -79,6 +79,10 @@ grpc::Status KvGrpcService::Mutate(grpc::ServerContext* ctx, const proto::Comman
   }
   if (result->cas_mismatch) {
     response->set_code(proto::KvResponse::CAS_MISMATCH);
+    const std::optional<uint32_t> failed = result->failed_check;
+    if (failed.has_value()) {
+      response->set_failed_check(failed.value());
+    }
     const std::optional<std::string>& found = result->value;
     if (found.has_value()) {
       response->set_value(*found);
@@ -144,6 +148,23 @@ grpc::Status KvGrpcService::Scan(grpc::ServerContext* ctx, const proto::ScanRequ
   }
   response->set_code(proto::KvResponse::OK);
   return grpc::Status::OK;
+}
+
+grpc::Status KvGrpcService::Batch(grpc::ServerContext* ctx, const proto::BatchRequest* request,
+                                  proto::KvResponse* response) {
+  constexpr int kMaxBatchOps = 10000;
+  if (request->ops_size() > kMaxBatchOps || request->checks_size() > kMaxBatchOps) {
+    response->set_code(proto::KvResponse::INVALID);
+    response->set_message("batch is too large");
+    return grpc::Status::OK;
+  }
+  proto::Command command;
+  command.set_client_id(request->client_id());
+  command.set_seq(request->seq());
+  proto::BatchCmd* batch = command.mutable_batch();
+  *batch->mutable_checks() = request->checks();
+  *batch->mutable_ops() = request->ops();
+  return Mutate(ctx, command, response);
 }
 
 grpc::Status KvGrpcService::Put(grpc::ServerContext* ctx, const proto::PutRequest* request,

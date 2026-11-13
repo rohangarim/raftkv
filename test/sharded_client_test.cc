@@ -146,5 +146,31 @@ TEST_F(ShardedClientTest, AnOlderMapNeverReplacesANewerOne) {
   EXPECT_EQ(client_->MapEpoch(), 5U);
 }
 
+TEST_F(ShardedClientTest, BatchSplitsByShardAndReportsWhatWasApplied) {
+  StartTwoShards();
+  ASSERT_TRUE(client_->Put("zz", "taken").IsOk());
+
+  // Writes land in both shards; the check on "zz" (shard 2) fails, but shard 1
+  // is applied first, so its write is reported for the caller to undo.
+  auto outcome = client_->Batch({{"zz", std::nullopt}}, {{"aa", "1"}, {"zz", "2"}});
+  ASSERT_TRUE(outcome.IsOk()) << outcome.GetStatus().ToString();
+  EXPECT_FALSE(outcome->applied);
+  ASSERT_TRUE(outcome->failed_check.has_value());
+  EXPECT_EQ(*outcome->failed_check, 0U);
+  // Shard 1 went first and applied "aa" (write 0); shard 2's group applied nothing.
+  EXPECT_EQ(outcome->applied_writes, (std::vector<size_t>{0}));
+  ASSERT_TRUE(client_->Delete("aa").IsOk());  // the caller undoes it
+
+  auto good = client_->Batch({{"aa", std::nullopt}, {"zz", "taken"}}, {{"aa", "1"}, {"zz", "2"}});
+  ASSERT_TRUE(good.IsOk());
+  EXPECT_TRUE(good->applied);
+  EXPECT_EQ(good->applied_writes.size(), 2U);
+  auto a = client_->Get("aa");
+  auto z = client_->Get("zz");
+  ASSERT_TRUE(a.IsOk() && z.IsOk());
+  EXPECT_EQ(**a, "1");
+  EXPECT_EQ(**z, "2");
+}
+
 }  // namespace
 }  // namespace raftkv::client

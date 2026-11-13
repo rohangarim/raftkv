@@ -222,6 +222,47 @@ Result<ScanPage> KvClient::Scan(std::string_view start, std::string_view end, ui
   return page;
 }
 
+Result<BatchOutcome> KvClient::Batch(const std::vector<BatchCheck>& checks,
+                                     const std::vector<BatchWrite>& writes) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::BatchRequest request;
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  for (const auto& check : checks) {
+    proto::BatchCheck* c = request.add_checks();
+    c->set_key(check.key);
+    if (check.expected.has_value()) {
+      c->set_expected(*check.expected);
+    }
+  }
+  for (const auto& write : writes) {
+    proto::BatchOp* op = request.add_ops();
+    if (write.value.has_value()) {
+      op->mutable_put()->set_key(write.key);
+      op->mutable_put()->set_value(*write.value);
+    } else {
+      op->mutable_delete_()->set_key(write.key);
+    }
+  }
+
+  proto::KvResponse response;
+  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                               proto::KvResponse* out) { return stub->Batch(ctx, request, out); },
+                           &response);
+  if (!s.IsOk()) {
+    return s;
+  }
+  BatchOutcome outcome;
+  outcome.applied = response.code() == proto::KvResponse::OK;
+  if (response.has_failed_check()) {
+    outcome.failed_check = response.failed_check();
+  }
+  return outcome;
+}
+
 Status KvClient::Put(std::string_view key, std::string_view value) {
   const std::lock_guard<std::mutex> op_lock(op_mutex_);
   proto::PutRequest request;

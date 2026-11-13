@@ -35,6 +35,13 @@ class ShardedClient {
   Result<CasOutcome> Cas(std::string_view key, std::optional<std::string> expected,
                          std::string_view new_value);
 
+  // Atomic within each shard, but NOT across shards: the keys are grouped by
+  // owner and each group is one Raft entry, applied in shard order. If a later
+  // group's check fails, earlier groups stay applied and are listed in
+  // `applied_writes` so the caller can undo them.
+  Result<BatchOutcome> Batch(const std::vector<BatchCheck>& checks,
+                             const std::vector<BatchWrite>& writes);
+
   // Up to `limit` entries of [start, end) in key order across shards. `limit`
   // 0 means everything. `more` reports whether the range holds entries past
   // the ones returned.
