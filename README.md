@@ -16,7 +16,7 @@ catches up from a snapshot instead of the log it no longer has.
 
 There are **no performance numbers yet**, because nothing has been benchmarked.
 When numbers show up here they'll link to raw output in `results/`. No file, no
-number. 272 tests, clang-tidy clean, green under ASan, UBSan and TSan, and the
+number. 297 tests, clang-tidy clean, green under ASan, UBSan and TSan, and the
 Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
 dropped, delayed and duplicated messages) checking all five safety invariants
 after every step. See [`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md) for what's
@@ -103,8 +103,12 @@ alternative and cost.
   copy, publish a new map, hand over, purge) while the rest of the key space
   keeps serving. Splits are resumable after a coordinator crash. But nothing
   decides *when* to split, there's no merge, and one split at a time per shard is
-  assumed. Writes to two shards still aren't atomic together, and there's no
-  membership change, TLS or auth.
+  assumed. There's no membership change, TLS or auth.
+- **Transactions are optimistic and key-granular.** A write spanning shards
+  commits with two-phase commit and is atomic, readers never see half of one,
+  and a coordinator that dies is cleaned up after by whoever meets its locks.
+  But reads are validated key by key, not by range, so a transaction can't
+  guard against phantom inserts, and contended keys retry rather than queue.
 - **Client sessions never expire**, and storage uses full compaction rather
   than leveled.
 

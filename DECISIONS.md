@@ -1294,3 +1294,51 @@ finish the split.
 compare-and-swap keeps two coordinators from publishing conflicting maps, but it
 does not stop both from fencing the same source. Purge is capped per command and
 repeated, and refuses any range overlapping what the group still owns.
+
+---
+
+## D-0052: Cross-shard transactions are two-phase commit with locks in the shards
+
+**Phase:** 6.
+
+**What:** a transaction locks every key it touches (writes, and keys it only read)
+on every shard involved, validating that each key it read still holds the value it
+saw. Committing the *primary* key (the smallest) is the single decision. The other
+shards are then rolled forward, and anyone who meets a lock left by a dead
+coordinator asks the primary's shard what was decided and finishes the job. All of
+it is replicated state, so a lock or a decision survives a leader change.
+
+**Choices and why:**
+- *Locks live in the data shard, in its own Raft log.* A lock is then exactly as
+  durable and as ordered as the data it guards, and no external lock service can
+  disagree with it.
+- *Readers and writers both respect locks.* A reader that finds an intent lock
+  settles it before answering, so a half-committed transaction is never visible.
+  A lock that only holds a key the transaction *read* is invisible to readers and
+  only blocks writers.
+- *Rollback leaves a marker.* Without it, a delayed prewrite from a transaction
+  someone already rolled back would create a lock nobody will ever clear.
+- *Whoever reaches the primary first decides.* A contender that gives up waiting
+  rolls the transaction back at the primary; if the coordinator's commit got there
+  first, the rollback learns it already committed. No timestamps or clocks are
+  involved, so clock skew cannot cause a wrong answer, only a slow one.
+- *Reads are validated, not versioned.* This is optimistic concurrency, not
+  snapshot isolation: a transaction either commits as if it ran alone, or reports
+  that something it read changed and the caller retries.
+
+**Tested by killing the coordinator** at the two points that matter (after
+prewrite and before the decision: the transaction must vanish; after the decision
+and before the other shard hears: it must be rolled forward by the next reader).
+Breaking validation, and breaking roll-forward, each fail the tests that should
+catch them.
+
+**Costs and limits, stated plainly:**
+- Scans are not validated, so a transaction cannot protect a *range* against
+  phantom inserts. SQL gets statement-level atomicity, not `BEGIN`/`COMMIT`.
+- An abandoned lock blocks its keys for `lock_wait` (300 ms by default) before
+  someone rolls it back.
+- Decision markers are never garbage-collected.
+- A range with a lock in it cannot be fenced for a split until the lock settles;
+  the split fails and is retried.
+- Contended keys retry a lot: 48 racing transfers over four accounts needed 34
+  retries in the test. That is correctness, not speed.
