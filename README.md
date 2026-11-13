@@ -8,24 +8,19 @@ whether any of it actually holds up.
 
 ## Where this is
 
-Phases 0 through 2 are done, and Phases 3 and 4 are mostly there. Three node
-processes talk gRPC over localhost, elect a leader, and replicate to every
-follower's disk. A client library finds the leader, follows redirects, retries
-safely, and does linearizable reads. Acknowledged writes survive the leader being
-killed with a real `SIGKILL`: `scripts/subprocess_cluster_test.sh` writes ten
-keys through the CLI, kills the leader process, and reads them all back.
-There are still **no performance numbers**, because nothing has been
-benchmarked. When numbers appear here, each will link to raw output in
-`results/` produced by a committed script. No file, no number.
+Three node processes talk gRPC, elect a leader, and replicate every write to
+each follower's disk. A client library finds the leader, follows redirects,
+retries safely, and does linearizable reads. Acknowledged writes survive the
+leader being killed with a real `SIGKILL`, and a node that falls far behind
+catches up from a snapshot instead of the log it no longer has.
 
-213 tests, clang-tidy clean, green under ASan, UBSan, and TSan. See `results/` for the latest sanitizer runs. The Raft
-core additionally runs 2000 randomized fault-injection scenarios — partitions,
-crashes, restarts, dropped, delayed, reordered, and duplicated messages —
-checking all five Raft safety invariants after every single step.
-
-Every number in this README is audited against a command that produced it. See
-[`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md), which also records the claims this
-project cannot yet support and why.
+There are **no performance numbers yet**, because nothing has been benchmarked.
+When numbers show up here they'll link to raw output in `results/`. No file, no
+number. 213 tests, clang-tidy clean, green under ASan, UBSan and TSan, and the
+Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
+dropped, delayed and duplicated messages) checking all five safety invariants
+after every step. See [`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md) for what's
+been audited and what can't be claimed yet.
 
 ## Build
 
@@ -57,107 +52,61 @@ nothing about how bytes reach a disk.
 
 ## Three decisions worth knowing about
 
-**Applying a command doesn't fsync.** The obvious design fsyncs the state
-machine on every apply, which means two fsyncs per write — one for the Raft log,
-one for storage. What apply actually needs is *atomicity* of the effect and the
-applied index, not durability. Both go into the same write batch, so they land
-in one WAL record behind one CRC: a crash mid-write discards both or neither,
-and anything lost is replayable from Raft's own durable log. The rule this trades
-for is *never compact the Raft log past what storage has durably persisted*.
+**Applying a command doesn't fsync.** Fsyncing the state machine on every apply
+means two fsyncs per write. Apply only needs the effect and the applied index to
+land atomically (one write batch, one WAL record); anything lost is replayable
+from Raft's own durable log. The catch: never compact the Raft log past what
+storage has persisted.
 
-**Commands carry a client id and sequence number.** When a leader dies
-mid-request, the client retries, and without dedup that write gets applied
-twice. So the state machine keeps a session table mapping each client to its
-last sequence and result, persisted in the same atomic batch as the write
-itself, and included in every snapshot. Skipping this is how a system passes
-all its own tests and then fails a linearizability checker.
+**Commands carry a client id and sequence number.** If a leader dies
+mid-request the client retries, and without dedup that write applies twice. A
+session table, saved in the same atomic batch and included in every snapshot,
+makes retries safe.
 
-**Only current-term entries commit by counting replicas.** This is the Figure 8
-case from the Raft paper, and it's the thing most from-scratch implementations
-get wrong. A leader that commits an earlier-term entry just because a majority
-stores it can lose that entry to a later leader with a different history. Such
-entries commit only indirectly, once a current-term entry above them commits.
+**Only current-term entries commit by counting replicas.** This is Figure 8 of
+the Raft paper, the thing most from-scratch implementations get wrong. Earlier
+entries commit only once a current-term entry above them does.
 
-## Testing the consensus core
+## How it's tested
 
-The Raft core has no threads, no sockets, and no clock — time enters only
-through `Tick()`. That means an entire five-node cluster runs inside one unit
-test, and a run is a pure function of its seed. The harness delays, reorders,
-drops, and duplicates messages, partitions arbitrary subsets, and kills and
-restarts nodes with nothing but their persisted state.
-
-All five safety invariants are checked after *every* step, not at the end, so a
-violation is caught where it happens rather than surfacing later as bad data.
-A failing seed replays exactly:
+The Raft core has no threads, sockets or clock, so a whole five-node cluster
+runs inside one unit test and every run is a pure function of its seed. The
+harness delays, reorders, drops and duplicates messages, partitions nodes, and
+restarts them with only their persisted state. The five safety invariants are
+checked after every step, so a bug is caught where it happens. A failing seed
+replays exactly:
 
 ```bash
 RAFTKV_SEED=5 ./build/test/raft_cluster_test --gtest_filter='*Randomized*'
 ```
 
-That's how the nastiest bug so far got found. A follower repaired its log
-correctly, then reverted on restart. The cause: deciding what to persist by
-comparing log *lengths*. When a follower truncates a conflicting suffix and
-refills it in the same step, the log ends up the same length with different
-entries — so nothing got written, and the discarded entries came back after a
-crash. It surfaced hundreds of steps later on a node that looked perfectly
-healthy.
+That's how the nastiest bug turned up: a follower fixed its log, then reverted
+after a restart. Persistence was decided by comparing log *lengths*, and a
+truncate-and-refill leaves the length unchanged, so nothing was written and the
+discarded entries came back.
 
-Every non-obvious choice is written down in [`DECISIONS.md`](DECISIONS.md) with
-its alternative and what it costs. If something here looks strange, the reason
-is probably there.
+Every non-obvious choice is in [`DECISIONS.md`](DECISIONS.md) with its
+alternative and cost.
 
-## Layout
+## What it doesn't do yet
 
-```
-proto/          wire format — the single source of truth
-src/raft/       consensus core: deterministic, no threads, no networking
-src/lsm/        storage engine: WAL, memtable, SSTables, compaction, snapshots
-src/statemachine/  the adapter Raft sees, plus the client session table
-src/transport/  gRPC adapters
-src/shard/      consistent hash ring and placement
-src/client/     routing, leader cache, retry, dedup
-bench/          load generator and latency histograms
-chaos/          nemesis, history recorder, linearizability checker
-results/        raw output, committed
-```
-
-## What this doesn't do
-
-Worth saying plainly, since a system's limits are more useful than its claims:
-
-- **The real-process test is one kill, not a campaign.** It writes ten keys,
-  kills one leader with `SIGKILL`, and checks they survive. No partitions (that
-  needs `tc`/`iptables` in Docker, Phase 7), no repeated runs, no linearizability
-  checking (Phase 10). It shows the durable path works under a real kill; it
-  does not show the system is correct under faults.
-- **Reads cost a quorum round trip each.** Linearizable reads use ReadIndex.
-  Lease reads, which skip the round trip at the price of assuming bounded clock
-  drift, are not implemented.
-- **A client that restarts must use a new `client_id`.** The cluster rejects a
-  reused sequence number carrying a different command, but cannot tell a
-  restarted client re-sending the *same* command from a retry. Sessions are also
-  never expired.
-- **Heavy concurrent writes starve heartbeats.** The driver holds its lock across
-  each fsync, so under load a leader can lose leadership. Group commit (Phase 9)
+- **The real-process test is one kill, not a campaign.** No network partitions
+  (needs Docker `tc`/`iptables`), no repeated runs, no linearizability checker.
+- **Heavy concurrent writes starve heartbeats.** The driver holds its lock
+  across each fsync, so under load a leader can lose leadership. Group commit
   is the fix.
-- **Snapshots are sent whole.** A lagging follower catches up through
-  `InstallSnapshot`, but the leader ships the entire state machine image in one
-  message and builds it in memory. Fine for megabytes, wrong for gigabytes;
-  chunked streaming is the fix. The leader also compacts its log right up to the
-  snapshot, so a follower only slightly behind gets a snapshot instead of a few
-  entries.
-- **No TLS, no auth.** Every channel is insecure. Not deployable as-is.
-- **No live resharding and no membership change.** The cluster config is fixed
-  at startup; changing it means a restart.
-- **Client sessions never expire.** Every client id ever seen is kept forever.
-  Expiry has to be deterministic across replicas, so a wall-clock TTL is wrong;
-  the right fix is expiry by log position, and it isn't built.
-- **Storage uses full compaction, not leveled.** Write amplification grows with
-  database size. Fine for a bounded benchmark, wrong for a large dataset.
-- **Snapshots block writes** for the length of a full compaction.
-- **Docker on one machine is not a real network.** The chaos harness can drop,
-  delay, and partition packets between five containers on one host. It cannot
-  reproduce a real WAN, and its fsync goes through a virtualization layer.
+- **Snapshots are sent whole**, in one message. Fine for megabytes, wrong for
+  gigabytes.
+- **Reads cost a quorum round trip.** No lease reads.
+- **No membership change, no resharding, no TLS or auth.**
+- **Client sessions never expire**, and storage uses full compaction rather
+  than leveled.
 
-This list grows as things become true, and nothing comes off it just because
-it's inconvenient.
+```
+proto/   wire format           src/raft/        consensus core
+src/lsm/ storage engine        src/statemachine/ what Raft applies to
+src/storage/ durable log       src/server/      node process + driver
+src/client/  leader-aware client   test/        unit, cluster and gRPC tests
+```
+
+`bench/`, `chaos/` and `src/shard/` are planned and still empty.
