@@ -114,6 +114,9 @@ message LockRecord {
   Kind kind = 3;
   // The value to install on commit, for PUT.
   bytes value = 4;
+  // The key this lock is on, so a reader that finds it (in a scan, say) knows
+  // what to settle.
+  bytes key = 5;
 }
 
 message TxnWrite {

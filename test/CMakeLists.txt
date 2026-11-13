@@ -115,6 +115,11 @@ raftkv_test(shard_split_test
   LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
   TIMEOUT 300)
 
+raftkv_test(txn_test
+  SOURCES txn_test.cc
+  LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
+  TIMEOUT 300)
+
 # Optional: build the SQL layer's cluster integration test from a raftsql
 # checkout, e.g. cmake --preset default -DRAFTKV_SQL_DIR=../raftsql
 set(RAFTKV_SQL_DIR "" CACHE PATH "raftsql checkout whose integration test to build")

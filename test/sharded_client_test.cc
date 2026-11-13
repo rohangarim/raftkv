@@ -146,25 +146,26 @@ TEST_F(ShardedClientTest, AnOlderMapNeverReplacesANewerOne) {
   EXPECT_EQ(client_->MapEpoch(), 5U);
 }
 
-TEST_F(ShardedClientTest, BatchSplitsByShardAndReportsWhatWasApplied) {
+TEST_F(ShardedClientTest, ABatchAcrossShardsIsAtomic) {
   StartTwoShards();
   ASSERT_TRUE(client_->Put("zz", "taken").IsOk());
 
-  // Writes land in both shards; the check on "zz" (shard 2) fails, but shard 1
-  // is applied first, so its write is reported for the caller to undo.
-  auto outcome = client_->Batch({{"zz", std::nullopt}}, {{"aa", "1"}, {"zz", "2"}});
-  ASSERT_TRUE(outcome.IsOk()) << outcome.GetStatus().ToString();
-  EXPECT_FALSE(outcome->applied);
-  ASSERT_TRUE(outcome->failed_check.has_value());
-  EXPECT_EQ(*outcome->failed_check, 0U);
-  // Shard 1 went first and applied "aa" (write 0); shard 2's group applied nothing.
-  EXPECT_EQ(outcome->applied_writes, (std::vector<size_t>{0}));
-  ASSERT_TRUE(client_->Delete("aa").IsOk());  // the caller undoes it
+  // "aa" lives on shard 1 and "zz" on shard 2. The check on "zz" fails, so the
+  // write to "aa" must not land either -- even though shard 1 would have
+  // accepted it on its own.
+  auto refused = client_->Batch({{"zz", std::nullopt}}, {{"aa", "1"}, {"zz", "2"}});
+  ASSERT_TRUE(refused.IsOk()) << refused.GetStatus().ToString();
+  EXPECT_FALSE(refused->applied);
+  ASSERT_TRUE(refused->failed_check.has_value());
+  EXPECT_EQ(*refused->failed_check, 0U);
+  EXPECT_TRUE(refused->applied_writes.empty());
+  auto aa = client_->Get("aa");
+  ASSERT_TRUE(aa.IsOk());
+  EXPECT_FALSE(aa->has_value()) << "half of a cross-shard batch was applied";
 
   auto good = client_->Batch({{"aa", std::nullopt}, {"zz", "taken"}}, {{"aa", "1"}, {"zz", "2"}});
   ASSERT_TRUE(good.IsOk());
   EXPECT_TRUE(good->applied);
-  EXPECT_EQ(good->applied_writes.size(), 2U);
   auto a = client_->Get("aa");
   auto z = client_->Get("zz");
   ASSERT_TRUE(a.IsOk() && z.IsOk());

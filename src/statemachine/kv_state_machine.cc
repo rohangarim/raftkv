@@ -479,6 +479,7 @@ ApplyResult KvStateMachine::PrepareTxn(const proto::TxnCmd& cmd, lsm::WriteBatch
         record.set_primary_key(cmd.primary_key());
         record.set_kind(w.kind());
         record.set_value(w.value());
+        record.set_key(w.key());
         batch->Put(LockKey(w.key()), record.SerializeAsString());
       }
       pending_lock_delta_ += added;
