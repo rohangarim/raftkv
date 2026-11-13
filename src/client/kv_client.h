@@ -90,6 +90,27 @@ struct BatchOutcome {
   std::vector<size_t> applied_writes;
 };
 
+// One key in a transaction's prewrite.
+struct TxnKey {
+  std::string key;
+  proto::LockRecord::Kind kind = proto::LockRecord::PUT;
+  std::string value;
+  // Validate before locking: the committed value must still be what the
+  // transaction read (`expected`), or absent when `expected_absent`.
+  bool validate = false;
+  bool expected_absent = false;
+  std::string expected;
+};
+
+struct TxnReply {
+  enum class Outcome { kOk, kLocked, kValidationFailed, kAborted, kAlreadyCommitted };
+  Outcome outcome = Outcome::kOk;
+  // When kLocked: who holds the key.
+  std::optional<proto::LockRecord> lock;
+  // When kValidationFailed: the first key that no longer matched, by position.
+  std::optional<size_t> failed_index;
+};
+
 struct CasOutcome {
   // True if the swap happened. False means the comparison failed: the
   // operation was applied and the answer is no.
@@ -127,6 +148,21 @@ class KvClient {
   Result<uint64_t> Purge(const RangeSpec& spec);
   // Bulk-loads key/value pairs, bypassing the ownership check.
   Status Import(const std::vector<std::pair<std::string, std::string>>& pairs);
+
+  // Transaction phases (see TxnCmd in kv.proto). All are replicated commands
+  // applied exactly once.
+  Result<TxnReply> Prewrite(const std::string& txid, const std::string& primary_key,
+                            const std::vector<TxnKey>& keys);
+  // `primary` marks the shard holding the primary key: applying it there is the
+  // transaction's commit decision.
+  Result<TxnReply> CommitTxn(const std::string& txid, const std::vector<std::string>& keys,
+                             bool primary);
+  Result<TxnReply> RollbackTxn(const std::string& txid, const std::vector<std::string>& keys);
+  // "C", "A", or nullopt when this group has recorded no decision.
+  Result<std::optional<std::string>> TxnDecision(const std::string& txid);
+
+  // After an operation fails with Code::kLocked, the lock that blocked it.
+  std::optional<proto::LockRecord> TakeLastLock();
 
   // Applies every write atomically if every check holds; otherwise changes
   // nothing. One Raft round trip however many keys are involved.
@@ -169,6 +205,7 @@ class KvClient {
   uint64_t next_seq_ = 1;
   uint64_t retries_ = 0;
   std::map<std::string, std::unique_ptr<proto::Kv::Stub>> stubs_;
+  std::optional<proto::LockRecord> last_lock_;  // guarded by state_mutex_
   std::mt19937_64 rng_;
 };
 

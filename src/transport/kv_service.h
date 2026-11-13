@@ -40,6 +40,10 @@ class KvGrpcService final : public proto::Kv::Service {
                      proto::KvResponse* response) override;
   grpc::Status Import(grpc::ServerContext* ctx, const proto::ImportRequest* request,
                       proto::KvResponse* response) override;
+  grpc::Status Txn(grpc::ServerContext* ctx, const proto::TxnRequest* request,
+                   proto::KvResponse* response) override;
+  grpc::Status TxnStatus(grpc::ServerContext* ctx, const proto::TxnStatusRequest* request,
+                         proto::KvResponse* response) override;
   grpc::Status Scan(grpc::ServerContext* ctx, const proto::ScanRequest* request,
                     proto::KvResponse* response) override;
 

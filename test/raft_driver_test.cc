@@ -74,6 +74,12 @@ class WatchingStateMachine final : public statemachine::StateMachine {
   statemachine::RangeVerdict CheckRange(std::string_view, std::string_view, bool) const override {
     return statemachine::RangeVerdict::kOk;
   }
+  std::optional<proto::LockRecord> FindBlockingLock(std::string_view, std::string_view) const override {
+    return std::nullopt;
+  }
+  lsm::Result<std::optional<std::string>> TxnDecision(std::string_view) const override {
+    return std::optional<std::string>{};
+  }
   lsm::Status Sync() override { return lsm::Status::Ok(); }
   lsm::Result<std::optional<std::string>> Get(std::string_view) const override {
     return std::optional<std::string>{};

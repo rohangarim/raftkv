@@ -113,15 +113,24 @@ class RaftDriver {
   // the state machine has applied through it, then read. Same error meanings
   // as ProposeAndWait; a read has no "outcome unknown" problem, so kTimedOut
   // here just means "try again".
+  // When `lock` is given and an in-flight transaction holds the key, the read
+  // returns OK with no value and reports the lock instead; without it, that is
+  // a Locked error. Either way the caller must settle the lock and retry.
   Result<std::optional<std::string>> LinearizableGet(std::string_view key,
-                                                     std::chrono::milliseconds timeout);
+                                                     std::chrono::milliseconds timeout,
+                                                     std::optional<proto::LockRecord>* lock = nullptr);
+
+  // "C", "A", or nullopt (no decision recorded here), read linearizably.
+  Result<std::optional<std::string>> LinearizableTxnDecision(std::string_view txid,
+                                                             std::chrono::milliseconds timeout);
 
   // Address of a peer (or self), for building a redirect. Empty if unknown.
   // A linearizable range read, with the same guarantee as LinearizableGet:
   // leadership is confirmed and the state machine caught up before it reads.
   Status LinearizableScan(std::string_view start, std::string_view end, size_t limit,
                           std::chrono::milliseconds timeout,
-                          const std::function<Status(std::string_view, std::string_view)>& fn);
+                          const std::function<Status(std::string_view, std::string_view)>& fn,
+                          std::optional<proto::LockRecord>* lock = nullptr);
 
   std::string AddressOf(uint64_t node_id) const;
 

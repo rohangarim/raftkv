@@ -25,6 +25,12 @@ std::string_view CodeName(Code code) {
       return "WrongShard";
     case Code::kMoving:
       return "Moving";
+    case Code::kLocked:
+      return "Locked";
+    case Code::kTxnAborted:
+      return "TxnAborted";
+    case Code::kConflict:
+      return "Conflict";
   }
   return "Unknown";
 }

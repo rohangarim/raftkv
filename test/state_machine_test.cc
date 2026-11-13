@@ -117,6 +117,58 @@ std::string EncodeImport(const std::string& client, uint64_t seq,
   return c.SerializeAsString();
 }
 
+struct TxnKeySpec {
+  TxnKeySpec(std::string k, proto::LockRecord::Kind kd, std::string v, bool validates = false,
+             bool absent = false, std::string expects = "")
+      : key(std::move(k)),
+        kind(kd),
+        value(std::move(v)),
+        validate(validates),
+        expected_absent(absent),
+        expected(std::move(expects)) {}
+  std::string key;
+  proto::LockRecord::Kind kind;
+  std::string value;
+  bool validate;
+  bool expected_absent;
+  std::string expected;
+};
+
+std::string EncodePrewrite(const std::string& client, uint64_t seq, const std::string& txid,
+                           const std::string& primary, const std::vector<TxnKeySpec>& keys) {
+  proto::Command c;
+  c.set_client_id(client);
+  c.set_seq(seq);
+  auto* t = c.mutable_txn();
+  t->set_kind(proto::TxnCmd::PREWRITE);
+  t->set_txid(txid);
+  t->set_primary_key(primary);
+  for (const auto& k : keys) {
+    auto* w = t->add_writes();
+    w->set_key(k.key);
+    w->set_kind(k.kind);
+    w->set_value(k.value);
+    w->set_validate(k.validate);
+    w->set_expected_absent(k.expected_absent);
+    w->set_expected(k.expected);
+  }
+  return c.SerializeAsString();
+}
+
+std::string EncodeTxnEnd(const std::string& client, uint64_t seq, proto::TxnCmd::Kind kind,
+                         const std::string& txid, const std::vector<std::string>& keys,
+                         bool primary = false) {
+  proto::Command c;
+  c.set_client_id(client);
+  c.set_seq(seq);
+  auto* t = c.mutable_txn();
+  t->set_kind(kind);
+  t->set_txid(txid);
+  t->set_primary(primary);
+  for (const auto& k : keys) t->add_keys(k);
+  return c.SerializeAsString();
+}
+
 class StateMachineTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -775,6 +827,181 @@ TEST_F(StateMachineTest, PurgeDeletesGivenAwayKeysAndNeverLiveOnes) {
   EXPECT_FALSE(Get("z").has_value());
   EXPECT_EQ(Get("a"), "v");
   EXPECT_EQ(Get("l"), "v");
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+TEST_F(StateMachineTest, PrewriteLocksWithoutChangingValuesAndCommitInstallsThem) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "a", "old")).status.IsOk());
+  const auto pre = Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "new-a"},
+                                                               {"b", proto::LockRecord::PUT, "new-b"}}));
+  ASSERT_TRUE(pre.status.IsOk());
+  EXPECT_EQ(pre.txn, TxnOutcome::kNone);
+  EXPECT_EQ(Get("a"), "old") << "a prewrite must not change visible values";
+  EXPECT_FALSE(Get("b").has_value());
+  EXPECT_TRUE(sm_->FindBlockingLock("a", "a").has_value());
+
+  const auto commit = Apply(3, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"a", "b"}, true));
+  ASSERT_TRUE(commit.status.IsOk());
+  EXPECT_EQ(commit.txn, TxnOutcome::kNone);
+  EXPECT_EQ(Get("a"), "new-a");
+  EXPECT_EQ(Get("b"), "new-b");
+  EXPECT_FALSE(sm_->FindBlockingLock("a", "a").has_value());
+  auto decision = sm_->TxnDecision("T1");
+  ASSERT_TRUE(decision.IsOk());
+  EXPECT_EQ(*decision, std::optional<std::string>("C"));
+}
+
+TEST_F(StateMachineTest, ALockOnlyKeyHoldsOffWritersButIsInvisibleToReaders) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "r", "v")).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "w", {{"r", proto::LockRecord::LOCK_ONLY, ""},
+                                                          {"w", proto::LockRecord::PUT, "x"}})).status.IsOk());
+  EXPECT_FALSE(sm_->FindBlockingLock("r", "r").has_value());
+  EXPECT_TRUE(sm_->FindBlockingLock("w", "w").has_value());
+  EXPECT_EQ(Apply(3, EncodePut("c", 2, "r", "sneaky")).txn, TxnOutcome::kLocked);
+  EXPECT_EQ(Get("r"), "v");
+  // Committing releases the read-only lock without writing anything to it.
+  ASSERT_TRUE(Apply(4, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"r", "w"}, true)).status.IsOk());
+  EXPECT_EQ(Get("r"), "v");
+  EXPECT_TRUE(Apply(5, EncodePut("c", 3, "r", "now-ok")).status.IsOk());
+}
+
+TEST_F(StateMachineTest, ConflictingPrewriteIsRefusedAndLocksNothing) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "1"}})).status.IsOk());
+  const auto r = Apply(2, EncodePrewrite("u", 1, "T2", "free", {{"free", proto::LockRecord::PUT, "x"},
+                                                                {"k", proto::LockRecord::PUT, "2"}}));
+  EXPECT_EQ(r.txn, TxnOutcome::kLocked);
+  ASSERT_TRUE(r.lock.has_value());
+  EXPECT_EQ(r.lock->txid(), "T1");
+  EXPECT_EQ(r.lock->primary_key(), "k");
+  EXPECT_FALSE(sm_->FindBlockingLock("free", "free").has_value()) << "the refused prewrite locked a key";
+  EXPECT_TRUE(Apply(3, EncodePut("c", 1, "free", "ok")).status.IsOk());
+}
+
+TEST_F(StateMachineTest, PrewriteValidatesWhatTheTransactionRead) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "k", "v1")).status.IsOk());
+  TxnKeySpec good{"k", proto::LockRecord::PUT, "v2", true, false, "v1"};
+  TxnKeySpec stale{"k", proto::LockRecord::PUT, "v2", true, false, "v0"};
+  TxnKeySpec absent{"nope", proto::LockRecord::PUT, "x", true, true, ""};
+  TxnKeySpec wrong_absent{"k", proto::LockRecord::PUT, "x", true, true, ""};
+
+  const auto bad = Apply(2, EncodePrewrite("t", 1, "T1", "k", {absent, stale}));
+  EXPECT_EQ(bad.txn, TxnOutcome::kValidationFailed);
+  ASSERT_TRUE(bad.failed_check.has_value());
+  EXPECT_EQ(*bad.failed_check, 1U);
+  EXPECT_FALSE(sm_->FindBlockingLock("nope", "nope").has_value()) << "validation is all or nothing";
+  EXPECT_EQ(Apply(3, EncodePrewrite("t", 2, "T2", "k", {wrong_absent})).txn, TxnOutcome::kValidationFailed);
+  EXPECT_EQ(Apply(4, EncodePrewrite("t", 3, "T3", "k", {good, absent})).txn, TxnOutcome::kNone);
+}
+
+TEST_F(StateMachineTest, PlainWritesToALockedKeyAreRefusedInEveryForm) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "tx"}})).status.IsOk());
+  EXPECT_EQ(Apply(2, EncodePut("c", 1, "k", "x")).txn, TxnOutcome::kLocked);
+  EXPECT_EQ(Apply(3, EncodeDelete("c", 2, "k")).txn, TxnOutcome::kLocked);
+  EXPECT_EQ(Apply(4, EncodeCas("c", 3, "k", std::nullopt, "x")).txn, TxnOutcome::kLocked);
+  EXPECT_EQ(Apply(5, EncodeBatch("c", 4, {{}, {{"other", "1"}, {"k", "2"}}})).txn, TxnOutcome::kLocked);
+  EXPECT_EQ(Apply(6, EncodeBatch("c", 5, {{{"k", std::nullopt}}, {{"other", "1"}}})).txn, TxnOutcome::kLocked);
+  EXPECT_FALSE(Get("other").has_value()) << "a refused batch wrote part of itself";
+  EXPECT_TRUE(Apply(7, EncodePut("c", 6, "unrelated", "fine")).status.IsOk());
+}
+
+TEST_F(StateMachineTest, RollbackReleasesLocksAndBlocksALatePrewrite) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "x"},
+                                                          {"b", proto::LockRecord::PUT, "y"}})).status.IsOk());
+  const auto rb = Apply(2, EncodeTxnEnd("o", 1, proto::TxnCmd::ROLLBACK, "T1", {"a", "b"}));
+  ASSERT_TRUE(rb.status.IsOk());
+  EXPECT_FALSE(sm_->FindBlockingLock("a", "a").has_value());
+  EXPECT_TRUE(Apply(3, EncodePut("c", 1, "a", "free")).status.IsOk());
+  auto decision = sm_->TxnDecision("T1");
+  ASSERT_TRUE(decision.IsOk());
+  EXPECT_EQ(*decision, std::optional<std::string>("A"));
+
+  // The coordinator's delayed prewrite shows up after the rollback.
+  EXPECT_EQ(Apply(4, EncodePrewrite("t", 2, "T1", "a", {{"a", proto::LockRecord::PUT, "late"}})).txn,
+            TxnOutcome::kAborted);
+  EXPECT_FALSE(sm_->FindBlockingLock("a", "a").has_value()) << "a late prewrite resurrected a lock";
+  // And committing the primary of a rolled-back transaction fails.
+  EXPECT_EQ(Apply(5, EncodeTxnEnd("t", 3, proto::TxnCmd::COMMIT, "T1", {"a"}, true)).txn, TxnOutcome::kAborted);
+  EXPECT_EQ(Get("a"), "free");
+}
+
+TEST_F(StateMachineTest, ACommittedTransactionCannotBeRolledBack) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "v"}})).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+  EXPECT_EQ(Apply(3, EncodeTxnEnd("o", 1, proto::TxnCmd::ROLLBACK, "T1", {"k"})).txn,
+            TxnOutcome::kAlreadyCommitted);
+  EXPECT_EQ(Get("k"), "v");
+  auto decision = sm_->TxnDecision("T1");
+  EXPECT_EQ(*decision, std::optional<std::string>("C"));
+}
+
+TEST_F(StateMachineTest, CommitIsIdempotentAndNeverReappliesAnOldValue) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "from-txn"}})).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+  ASSERT_TRUE(Apply(3, EncodePut("c", 1, "k", "later-write")).status.IsOk());
+  // A resolver and the coordinator both roll the key forward; the second must
+  // not clobber what happened since.
+  const auto again = Apply(4, EncodeTxnEnd("r", 1, proto::TxnCmd::COMMIT, "T1", {"k"}));
+  EXPECT_TRUE(again.status.IsOk());
+  EXPECT_EQ(again.txn, TxnOutcome::kNone);
+  EXPECT_EQ(Get("k"), "later-write");
+}
+
+TEST_F(StateMachineTest, CommittingAKeyWhoseLockWasRolledBackReportsAbort) {
+  EXPECT_EQ(Apply(1, EncodeTxnEnd("t", 1, proto::TxnCmd::COMMIT, "T9", {"k"}, false)).txn, TxnOutcome::kAborted);
+  EXPECT_FALSE(Get("k").has_value());
+}
+
+TEST_F(StateMachineTest, DeleteIntentRemovesTheKeyOnCommit) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "k", "v")).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::DELETE, ""}})).status.IsOk());
+  EXPECT_EQ(Get("k"), "v");
+  ASSERT_TRUE(Apply(3, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+  EXPECT_FALSE(Get("k").has_value());
+}
+
+TEST_F(StateMachineTest, LocksAndDecisionsSurviveAReopenAndASnapshotRestore) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "v"}})).status.IsOk());
+  Open();
+  EXPECT_EQ(Apply(2, EncodePut("c", 1, "k", "x")).txn, TxnOutcome::kLocked) << "the lock count was lost on reopen";
+
+  auto snapshot = sm_->TakeSnapshot(sm_->LastAppliedIndex(), 1);
+  ASSERT_TRUE(snapshot.IsOk());
+  const std::filesystem::path other = dir_ / "restored";
+  std::filesystem::create_directories(other);
+  Open(&other);
+  ASSERT_TRUE(sm_->RestoreSnapshot(**snapshot).IsOk());
+  EXPECT_EQ(Apply(sm_->LastAppliedIndex() + 1, EncodePut("c", 2, "k", "x")).txn, TxnOutcome::kLocked);
+  ASSERT_TRUE(Apply(sm_->LastAppliedIndex() + 1, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+  EXPECT_EQ(Get("k"), "v");
+}
+
+TEST_F(StateMachineTest, ARangeWithATransactionInFlightCannotBeFenced) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "m", {{"m", proto::LockRecord::PUT, "v"}})).status.IsOk());
+  const auto fence = Apply(2, EncodeRange("admin", 1, proto::RangeCmd::FENCE, "k", "", true, 1));
+  EXPECT_FALSE(fence.status.IsOk());
+  // Below the lock is fine.
+  EXPECT_TRUE(Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "a", "k", false, 1)).status.IsOk());
+}
+
+TEST_F(StateMachineTest, TransactionsRespectShardOwnership) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
+  EXPECT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "x"}})).wrong_shard);
+  EXPECT_FALSE(sm_->FindBlockingLock("a", "a").has_value());
+}
+
+TEST_F(StateMachineTest, ARefusedPrewriteIsCachedForRetries) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "1"}})).status.IsOk());
+  const std::string cmd = EncodePrewrite("u", 1, "T2", "k", {{"k", proto::LockRecord::PUT, "2"}});
+  const auto first = Apply(2, cmd);
+  ASSERT_EQ(first.txn, TxnOutcome::kLocked);
+  const auto retry = Apply(3, cmd);
+  EXPECT_TRUE(retry.deduplicated);
+  EXPECT_EQ(retry.txn, TxnOutcome::kLocked);
+  ASSERT_TRUE(retry.lock.has_value());
+  EXPECT_EQ(retry.lock->txid(), "T1");
 }
 
 }  // namespace raftkv::statemachine

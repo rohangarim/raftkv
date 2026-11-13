@@ -37,6 +37,8 @@ namespace raftkv::statemachine {
 inline constexpr char kUserPrefix = 'u';
 inline constexpr char kMetaPrefix = 'm';
 inline constexpr char kSessionPrefix = 's';
+inline constexpr char kLockPrefix = 'l';    // l<key> -> LockRecord
+inline constexpr char kTxnPrefix = 'x';     // x<txid> -> 'C' or 'A'
 
 inline constexpr std::string_view kAppliedIndexKey = "applied_index";
 
@@ -52,6 +54,9 @@ class KvStateMachine final : public StateMachine {
               const std::function<Status(std::string_view, std::string_view)>& fn) const override;
   RangeVerdict CheckRange(std::string_view start, std::string_view end,
                           bool write) const override;
+  std::optional<proto::LockRecord> FindBlockingLock(std::string_view start,
+                                                    std::string_view end) const override;
+  Result<std::optional<std::string>> TxnDecision(std::string_view txid) const override;
   Status Sync() override;
 
   // Direct read path, used by linearizable reads in Phase 4. Does not go
@@ -70,6 +75,14 @@ class KvStateMachine final : public StateMachine {
 
   Status LoadAppliedIndex();
   Status LoadRange();
+  Status LoadLockCount();
+
+  static std::string LockKey(std::string_view key);
+  static std::string TxnKey(std::string_view txid);
+  Result<std::optional<proto::LockRecord>> GetLock(std::string_view key) const;
+  // The first lock that blocks a plain write to any key `command` touches.
+  ApplyResult CheckWriteLocks(const proto::Command& command, bool* blocked) const;
+  ApplyResult PrepareTxn(const proto::TxnCmd& cmd, lsm::WriteBatch* batch);
 
   // Judges one key against the owned and fenced ranges. Caller holds mutex_.
   RangeVerdict JudgeKey(std::string_view key, bool write) const;
@@ -100,6 +113,11 @@ class KvStateMachine final : public StateMachine {
   // Set by Prepare when a command changes `range_`; installed by Apply only
   // once the write that persists it has succeeded.
   std::optional<proto::RangeState> pending_range_;
+
+  // How many locks exist, so the common case of none costs nothing per write.
+  // Guarded by mutex_; changes are staged in pending_lock_delta_ like the range.
+  int64_t lock_count_ = 0;
+  int64_t pending_lock_delta_ = 0;
 };
 
 }  // namespace raftkv::statemachine

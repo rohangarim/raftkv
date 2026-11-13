@@ -35,6 +35,28 @@ ApplyResult ResultFromCached(const proto::CommandResult& cached) {
       out.status = Status::Ok();
       out.moving = true;
       break;
+    case proto::CommandResult::LOCKED:
+      out.status = Status::Ok();
+      out.txn = TxnOutcome::kLocked;
+      if (cached.has_lock()) {
+        out.lock = cached.lock();
+      }
+      break;
+    case proto::CommandResult::VALIDATION_FAILED:
+      out.status = Status::Ok();
+      out.txn = TxnOutcome::kValidationFailed;
+      if (cached.has_failed_check()) {
+        out.failed_check = cached.failed_check();
+      }
+      break;
+    case proto::CommandResult::TXN_ABORTED:
+      out.status = Status::Ok();
+      out.txn = TxnOutcome::kAborted;
+      break;
+    case proto::CommandResult::ALREADY_COMMITTED:
+      out.status = Status::Ok();
+      out.txn = TxnOutcome::kAlreadyCommitted;
+      break;
     default:
       out.status = Status::InvalidArgument("cached result: invalid command");
       break;
@@ -70,6 +92,28 @@ proto::CommandResult CacheableResult(const ApplyResult& result) {
   if (result.moving) {
     cached.set_code(proto::CommandResult::MOVING);
     return cached;
+  }
+  switch (result.txn) {
+    case TxnOutcome::kLocked:
+      cached.set_code(proto::CommandResult::LOCKED);
+      if (result.lock.has_value()) {
+        *cached.mutable_lock() = *result.lock;
+      }
+      return cached;
+    case TxnOutcome::kValidationFailed:
+      cached.set_code(proto::CommandResult::VALIDATION_FAILED);
+      if (result.failed_check.has_value()) {
+        cached.set_failed_check(*result.failed_check);
+      }
+      return cached;
+    case TxnOutcome::kAborted:
+      cached.set_code(proto::CommandResult::TXN_ABORTED);
+      return cached;
+    case TxnOutcome::kAlreadyCommitted:
+      cached.set_code(proto::CommandResult::ALREADY_COMMITTED);
+      return cached;
+    case TxnOutcome::kNone:
+      break;
   }
   cached.set_code(result.cas_mismatch ? proto::CommandResult::CAS_MISMATCH
                                       : proto::CommandResult::OK);
@@ -112,6 +156,7 @@ Result<std::unique_ptr<KvStateMachine>> KvStateMachine::Open(lsm::Options option
   std::unique_ptr<KvStateMachine> sm(new KvStateMachine(opened.TakeValue()));
   RAFTKV_RETURN_IF_ERROR(sm->LoadAppliedIndex());
   RAFTKV_RETURN_IF_ERROR(sm->LoadRange());
+  RAFTKV_RETURN_IF_ERROR(sm->LoadLockCount());
   return sm;
 }
 
@@ -133,6 +178,99 @@ Status KvStateMachine::LoadAppliedIndex() {
   LOG_INFO("statemachine: recovered at applied index %llu",
            static_cast<unsigned long long>(last_applied_index_));
   return Status::Ok();
+}
+
+namespace {
+// The lock a lookup found, or null. Callers test a pointer rather than reaching
+// through a Result into an optional.
+const proto::LockRecord* HeldLock(const Result<std::optional<proto::LockRecord>>& r) {
+  if (!r.IsOk()) {
+    return nullptr;
+  }
+  const std::optional<proto::LockRecord>& v = *r;
+  return v.has_value() ? &v.value() : nullptr;
+}
+}  // namespace
+
+std::string KvStateMachine::LockKey(std::string_view key) {
+  std::string out(1, kLockPrefix);
+  out.append(key);
+  return out;
+}
+
+std::string KvStateMachine::TxnKey(std::string_view txid) {
+  std::string out(1, kTxnPrefix);
+  out.append(txid);
+  return out;
+}
+
+Status KvStateMachine::LoadLockCount() {
+  int64_t count = 0;
+  const std::string lo(1, kLockPrefix);
+  const std::string hi(1, static_cast<char>(kLockPrefix + 1));
+  RAFTKV_RETURN_IF_ERROR(db_->Scan(lo, hi, 0, [&count](std::string_view, std::string_view) {
+    ++count;
+    return Status::Ok();
+  }));
+  lock_count_ = count;
+  return Status::Ok();
+}
+
+Result<std::optional<proto::LockRecord>> KvStateMachine::GetLock(std::string_view key) const {
+  auto got = db_->Get(LockKey(key));
+  if (!got.IsOk()) {
+    return got.GetStatus();
+  }
+  const std::optional<std::string>& stored = *got;
+  if (!stored.has_value()) {
+    return std::optional<proto::LockRecord>{};
+  }
+  proto::LockRecord record;
+  if (!record.ParseFromString(stored.value())) {
+    return Status::Corruption("lock record failed to parse");
+  }
+  return std::optional<proto::LockRecord>{std::move(record)};
+}
+
+std::optional<proto::LockRecord> KvStateMachine::FindBlockingLock(std::string_view start,
+                                                                  std::string_view end) const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (lock_count_ == 0) {
+    return std::nullopt;
+  }
+  std::optional<proto::LockRecord> found;
+  if (start == end) {
+    auto got = GetLock(start);
+    const proto::LockRecord* held = HeldLock(got);
+    if (held != nullptr && held->kind() != proto::LockRecord::LOCK_ONLY) {
+      found = *held;
+    }
+    return found;
+  }
+  const std::string lo = LockKey(start);
+  std::string hi;
+  if (end.empty()) {
+    hi.push_back(static_cast<char>(kLockPrefix + 1));
+  } else {
+    hi = LockKey(end);
+  }
+  (void)db_->Scan(lo, hi, 0, [&](std::string_view, std::string_view value) {
+    proto::LockRecord record;
+    if (record.ParseFromString(std::string(value)) &&
+        record.kind() != proto::LockRecord::LOCK_ONLY && !found.has_value()) {
+      found = std::move(record);
+    }
+    return Status::Ok();
+  });
+  return found;
+}
+
+Result<std::optional<std::string>> KvStateMachine::TxnDecision(std::string_view txid) const {
+  auto got = db_->Get(TxnKey(txid));
+  if (!got.IsOk()) {
+    return got.GetStatus();
+  }
+  return *got;
 }
 
 Status KvStateMachine::LoadRange() {
@@ -220,6 +358,196 @@ RangeVerdict KvStateMachine::JudgeCommand(const proto::Command& command) const {
   return worst;
 }
 
+ApplyResult KvStateMachine::CheckWriteLocks(const proto::Command& command, bool* blocked) const {
+  ApplyResult result;
+  *blocked = false;
+  if (lock_count_ == 0) {
+    return result;
+  }
+  std::vector<std::string_view> keys;
+  switch (command.op_case()) {
+    case proto::Command::kPut:
+      keys.push_back(command.put().key());
+      break;
+    case proto::Command::kDelete:
+      keys.push_back(command.delete_().key());
+      break;
+    case proto::Command::kCas:
+      keys.push_back(command.cas().key());
+      break;
+    case proto::Command::kBatch:
+      for (const auto& c : command.batch().checks()) keys.push_back(c.key());
+      for (const auto& op : command.batch().ops()) {
+        keys.push_back(op.op_case() == proto::BatchOp::kPut ? std::string_view(op.put().key())
+                                                           : std::string_view(op.delete_().key()));
+      }
+      break;
+    default:
+      return result;
+  }
+  for (std::string_view key : keys) {
+    auto lock = GetLock(key);
+    if (!lock.IsOk()) {
+      result.status = lock.GetStatus();
+      *blocked = true;
+      return result;
+    }
+    if (const proto::LockRecord* held = HeldLock(lock); held != nullptr) {
+      result.status = Status::Ok();
+      result.txn = TxnOutcome::kLocked;
+      result.lock = *held;
+      *blocked = true;
+      return result;
+    }
+  }
+  return result;
+}
+
+ApplyResult KvStateMachine::PrepareTxn(const proto::TxnCmd& cmd, lsm::WriteBatch* batch) {
+  ApplyResult result;
+  result.status = Status::Ok();
+  const std::string& txid = cmd.txid();
+  if (txid.empty()) {
+    result.status = Status::InvalidArgument("a transaction needs an id");
+    return result;
+  }
+  auto marker = db_->Get(TxnKey(txid));
+  if (!marker.IsOk()) {
+    result.status = marker.GetStatus();
+    return result;
+  }
+  const std::optional<std::string>& decided = *marker;
+  const bool committed = decided.has_value() && decided.value() == "C";
+  const bool aborted = decided.has_value() && decided.value() == "A";
+
+  switch (cmd.kind()) {
+    case proto::TxnCmd::PREWRITE: {
+      if (aborted || committed) {
+        // A prewrite that arrives after its transaction was settled (a delayed
+        // retry) must not resurrect a lock.
+        result.txn = TxnOutcome::kAborted;
+        return result;
+      }
+      if (cmd.writes_size() == 0) {
+        result.status = Status::InvalidArgument("a prewrite needs at least one key");
+        return result;
+      }
+      for (int i = 0; i < cmd.writes_size(); ++i) {
+        const auto& w = cmd.writes(i);
+        const RangeVerdict verdict = JudgeKey(w.key(), true);
+        if (verdict != RangeVerdict::kOk) {
+          result.wrong_shard = verdict == RangeVerdict::kWrongShard;
+          result.moving = verdict == RangeVerdict::kMoving;
+          return result;
+        }
+        auto lock = GetLock(w.key());
+        if (!lock.IsOk()) {
+          result.status = lock.GetStatus();
+          return result;
+        }
+        if (const proto::LockRecord* held = HeldLock(lock);
+            held != nullptr && held->txid() != txid) {
+          result.txn = TxnOutcome::kLocked;
+          result.lock = *held;
+          return result;
+        }
+        if (w.validate()) {
+          auto current = db_->Get(UserKey(w.key()));
+          if (!current.IsOk()) {
+            result.status = current.GetStatus();
+            return result;
+          }
+          const std::optional<std::string>& observed = *current;
+          const bool holds = w.expected_absent() ? !observed.has_value()
+                                               : (observed.has_value() && observed.value() == w.expected());
+          if (!holds) {
+            result.txn = TxnOutcome::kValidationFailed;
+            result.failed_check = static_cast<uint32_t>(i);
+            return result;
+          }
+        }
+      }
+      // Everything passed: take every lock. All or nothing, in one write.
+      int64_t added = 0;
+      for (const auto& w : cmd.writes()) {
+        auto existing = GetLock(w.key());
+        if (existing.IsOk() && HeldLock(existing) == nullptr) {
+          ++added;
+        }
+        proto::LockRecord record;
+        record.set_txid(txid);
+        record.set_primary_key(cmd.primary_key());
+        record.set_kind(w.kind());
+        record.set_value(w.value());
+        batch->Put(LockKey(w.key()), record.SerializeAsString());
+      }
+      pending_lock_delta_ += added;
+      return result;
+    }
+
+    case proto::TxnCmd::COMMIT: {
+      if (cmd.primary() && aborted) {
+        result.txn = TxnOutcome::kAborted;
+        return result;
+      }
+      int64_t removed = 0;
+      for (const auto& key : cmd.keys()) {
+        auto lock = GetLock(key);
+        if (!lock.IsOk()) {
+          result.status = lock.GetStatus();
+          return result;
+        }
+        if (const proto::LockRecord* held = HeldLock(lock);
+            held != nullptr && held->txid() == txid) {
+          const proto::LockRecord& record = *held;
+          if (record.kind() == proto::LockRecord::PUT) {
+            batch->Put(UserKey(key), record.value());
+          } else if (record.kind() == proto::LockRecord::DELETE) {
+            batch->Delete(UserKey(key));
+          }
+          batch->Delete(LockKey(key));
+          ++removed;
+        } else if (!committed) {
+          // The lock is gone and no commit was recorded: it was rolled back.
+          result.txn = TxnOutcome::kAborted;
+          pending_lock_delta_ = 0;
+          return result;
+        }
+        // else: already applied by an earlier attempt; committing is idempotent.
+      }
+      batch->Put(TxnKey(txid), "C");
+      pending_lock_delta_ -= removed;
+      return result;
+    }
+
+    case proto::TxnCmd::ROLLBACK: {
+      if (committed) {
+        result.txn = TxnOutcome::kAlreadyCommitted;
+        return result;
+      }
+      int64_t removed = 0;
+      for (const auto& key : cmd.keys()) {
+        auto lock = GetLock(key);
+        if (const proto::LockRecord* held = HeldLock(lock);
+            held != nullptr && held->txid() == txid) {
+          batch->Delete(LockKey(key));
+          ++removed;
+        }
+      }
+      // The marker is what stops a late prewrite of this transaction from
+      // taking a lock after we have settled it.
+      batch->Put(TxnKey(txid), "A");
+      pending_lock_delta_ -= removed;
+      return result;
+    }
+
+    default:
+      break;
+  }
+  result.status = Status::InvalidArgument("unknown transaction command");
+  return result;
+}
+
 ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, lsm::WriteBatch* batch) {
   ApplyResult result;
   if (cmd.epoch() < range_.epoch()) {
@@ -282,6 +610,25 @@ ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, lsm::WriteB
       next.set_owned_lo("");
       next.set_owned_unbounded(true);
     }
+    // Locks live beside the data but are not copied with it, so a range with a
+    // transaction in flight cannot move until that transaction settles.
+    if (lock_count_ > 0) {
+      std::string hi;
+      if (cmd.unbounded_hi()) {
+        hi.push_back(static_cast<char>(kLockPrefix + 1));
+      } else {
+        hi = LockKey(cmd.hi());
+      }
+      bool has_lock = false;
+      (void)db_->Scan(LockKey(cmd.lo()), hi, 1, [&](std::string_view, std::string_view) {
+        has_lock = true;
+        return Status::Ok();
+      });
+      if (has_lock) {
+        result.status = Status::Unavailable("range has transactions in flight; retry after they settle");
+        return result;
+      }
+    }
     next.set_fenced(true);
     next.set_fence_lo(cmd.lo());
     next.set_fence_hi(cmd.hi());
@@ -341,6 +688,7 @@ Result<std::optional<proto::SessionEntry>> KvStateMachine::LookupSession(
 
 ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBatch* batch) {
   ApplyResult result;
+  pending_lock_delta_ = 0;
 
   // Ownership is decided here, inside the replicated apply, so every replica
   // accepts or refuses exactly the same writes either side of a handover.
@@ -350,6 +698,15 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
     result.wrong_shard = verdict == RangeVerdict::kWrongShard;
     result.moving = verdict == RangeVerdict::kMoving;
     return result;
+  }
+
+  // A plain write to a key an in-flight transaction holds would be silently
+  // overwritten when that transaction commits, so it is refused until the lock
+  // is settled.
+  bool blocked = false;
+  ApplyResult locked = CheckWriteLocks(command, &blocked);
+  if (blocked) {
+    return locked;
   }
 
   switch (command.op_case()) {
@@ -432,6 +789,9 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
 
     case proto::Command::kRange:
       return PrepareRange(command.range(), batch);
+
+    case proto::Command::kTxn:
+      return PrepareTxn(command.txn(), batch);
 
     case proto::Command::kImport:
       for (const auto& put : command.import().puts()) {
@@ -555,6 +915,7 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
   const Status s = db_->Write(batch);
   if (!s.IsOk()) {
     pending_range_.reset();
+    pending_lock_delta_ = 0;
     result.status = s;
     return result;
   }
@@ -563,6 +924,8 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
     range_ = std::move(*pending_range_);
     pending_range_.reset();
   }
+  lock_count_ += pending_lock_delta_;
+  pending_lock_delta_ = 0;
   return result;
 }
 
@@ -700,6 +1063,7 @@ Status KvStateMachine::RestoreSnapshot(Snapshot& snapshot) {
   RAFTKV_RETURN_IF_ERROR(db_->SyncWal());
   last_applied_index_ = header.last_included_index();
   RAFTKV_RETURN_IF_ERROR(LoadRange());
+  RAFTKV_RETURN_IF_ERROR(LoadLockCount());
 
   LOG_INFO("statemachine: restored snapshot at index %llu term %llu",
            static_cast<unsigned long long>(header.last_included_index()),

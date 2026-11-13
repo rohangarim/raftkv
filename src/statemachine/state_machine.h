@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 
+#include "kv.pb.h"
 #include "lsm/status.h"
 
 namespace raftkv::statemachine {
@@ -24,6 +25,15 @@ using lsm::Status;
 // Outcome of applying one command.
 // Whether a key (or range of keys) belongs to this group.
 enum class RangeVerdict { kOk, kWrongShard, kMoving };
+
+// What a transaction command found, beyond plain success.
+enum class TxnOutcome {
+  kNone,
+  kLocked,            // another transaction holds a key
+  kValidationFailed,  // a validated read no longer holds
+  kAborted,           // the transaction was rolled back (or never could commit)
+  kAlreadyCommitted,  // asked to roll back something that already committed
+};
 
 struct ApplyResult {
   // Non-Ok means the command was malformed or could not be applied. It does
@@ -41,6 +51,10 @@ struct ApplyResult {
   // keys inside a range that is being handed over.
   bool wrong_shard = false;
   bool moving = false;
+
+  TxnOutcome txn = TxnOutcome::kNone;
+  // The lock that blocked the command, when txn == kLocked.
+  std::optional<proto::LockRecord> lock;
 
   // For a batch whose precondition failed: which check, by position.
   std::optional<uint32_t> failed_check;
@@ -129,6 +143,16 @@ class StateMachine {
   // is start == end.
   virtual RangeVerdict CheckRange(std::string_view start, std::string_view end,
                                   bool write) const = 0;
+
+  // The first lock held by an in-flight transaction that a read of [start, end)
+  // must not step over: one that will change a key on commit. Locks that only
+  // hold a key against writers are invisible to readers. A point key is
+  // start == end.
+  virtual std::optional<proto::LockRecord> FindBlockingLock(std::string_view start,
+                                                            std::string_view end) const = 0;
+
+  // "C" committed, "A" aborted, or nullopt: no decision is recorded here.
+  virtual Result<std::optional<std::string>> TxnDecision(std::string_view txid) const = 0;
 
   // Makes everything applied so far durable.
   //

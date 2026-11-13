@@ -633,8 +633,8 @@ Status RaftDriver::AwaitReadPoint(std::chrono::steady_clock::time_point deadline
   return Status::Ok();
 }
 
-Result<std::optional<std::string>> RaftDriver::LinearizableGet(std::string_view key,
-                                                               std::chrono::milliseconds timeout) {
+Result<std::optional<std::string>> RaftDriver::LinearizableGet(
+    std::string_view key, std::chrono::milliseconds timeout, std::optional<proto::LockRecord>* lock) {
   RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
   // Ownership is judged AFTER the read point: that is when this node's view of
   // its range is guaranteed current, so a handover that completed before the
@@ -642,15 +642,38 @@ Result<std::optional<std::string>> RaftDriver::LinearizableGet(std::string_view 
   if (state_machine_->CheckRange(key, key, false) != statemachine::RangeVerdict::kOk) {
     return Status::WrongShard("key is not in this group's range");
   }
+  std::optional<proto::LockRecord> blocking = state_machine_->FindBlockingLock(key, key);
+  if (blocking.has_value()) {
+    if (lock == nullptr) {
+      return Status::Locked("key is locked by an in-flight transaction");
+    }
+    *lock = std::move(blocking);
+    return std::optional<std::string>{};
+  }
   return state_machine_->Get(key);
+}
+
+Result<std::optional<std::string>> RaftDriver::LinearizableTxnDecision(
+    std::string_view txid, std::chrono::milliseconds timeout) {
+  RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
+  return state_machine_->TxnDecision(txid);
 }
 
 Status RaftDriver::LinearizableScan(
     std::string_view start, std::string_view end, size_t limit, std::chrono::milliseconds timeout,
-    const std::function<Status(std::string_view, std::string_view)>& fn) {
+    const std::function<Status(std::string_view, std::string_view)>& fn,
+    std::optional<proto::LockRecord>* lock) {
   RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
   if (state_machine_->CheckRange(start, end, false) != statemachine::RangeVerdict::kOk) {
     return Status::WrongShard("scan range is not inside this group's range");
+  }
+  std::optional<proto::LockRecord> blocking = state_machine_->FindBlockingLock(start, end);
+  if (blocking.has_value()) {
+    if (lock == nullptr) {
+      return Status::Locked("range holds a key locked by an in-flight transaction");
+    }
+    *lock = std::move(blocking);
+    return Status::Ok();
   }
   return state_machine_->Scan(start, end, limit, fn);
 }

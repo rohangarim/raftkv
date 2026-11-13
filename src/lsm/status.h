@@ -18,6 +18,9 @@ enum class Code : uint8_t {
   kTimedOut,     // gave up waiting: the operation MAY have happened
   kWrongShard,   // the key is not in the range this group owns: refresh the shard map
   kMoving,       // the range is mid-handover and refuses writes: retry shortly
+  kLocked,       // a key is held by an in-flight transaction: settle it and retry
+  kTxnAborted,   // the transaction was rolled back
+  kConflict,     // a validated read no longer holds
 };
 
 // A small non-throwing error type. The storage engine is on the apply path,
@@ -41,6 +44,9 @@ class [[nodiscard]] Status {
   static Status TimedOut(std::string msg) { return Status(Code::kTimedOut, std::move(msg)); }
   static Status WrongShard(std::string msg) { return Status(Code::kWrongShard, std::move(msg)); }
   static Status Moving(std::string msg) { return Status(Code::kMoving, std::move(msg)); }
+  static Status Locked(std::string msg) { return Status(Code::kLocked, std::move(msg)); }
+  static Status TxnAborted(std::string msg) { return Status(Code::kTxnAborted, std::move(msg)); }
+  static Status Conflict(std::string msg) { return Status(Code::kConflict, std::move(msg)); }
 
   bool IsOk() const { return code_ == Code::kOk; }
   Code ErrCode() const { return code_; }

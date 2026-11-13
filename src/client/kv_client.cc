@@ -128,8 +128,20 @@ Status KvClient::Execute(const Attempt& attempt, proto::KvResponse* response) {
     }
 
     switch (reply.code()) {
+      case proto::KvResponse::LOCKED: {
+        // Terminal here: only the caller can settle another transaction's lock.
+        const std::lock_guard<std::mutex> lock(state_mutex_);
+        leader_ = address;
+        last_lock_ = reply.has_lock() ? std::optional<proto::LockRecord>(reply.lock())
+                                      : std::optional<proto::LockRecord>();
+        return Status::Locked("key is locked by an in-flight transaction");
+      }
+
       case proto::KvResponse::OK:
       case proto::KvResponse::NOT_FOUND:
+      case proto::KvResponse::VALIDATION_FAILED:
+      case proto::KvResponse::TXN_ABORTED:
+      case proto::KvResponse::ALREADY_COMMITTED:
       case proto::KvResponse::CAS_MISMATCH: {
         const std::lock_guard<std::mutex> lock(state_mutex_);
         leader_ = address;
@@ -410,6 +422,149 @@ Result<CasOutcome> KvClient::Cas(std::string_view key, std::optional<std::string
     outcome.current = response.value();
   }
   return outcome;
+}
+
+std::optional<proto::LockRecord> KvClient::TakeLastLock() {
+  const std::lock_guard<std::mutex> lock(state_mutex_);
+  std::optional<proto::LockRecord> out = std::move(last_lock_);
+  last_lock_.reset();
+  return out;
+}
+
+namespace {
+Result<TxnReply> ToReply(const proto::KvResponse& response) {
+  TxnReply reply;
+  switch (response.code()) {
+    case proto::KvResponse::OK:
+      reply.outcome = TxnReply::Outcome::kOk;
+      break;
+    case proto::KvResponse::VALIDATION_FAILED:
+      reply.outcome = TxnReply::Outcome::kValidationFailed;
+      if (response.has_failed_check()) {
+        reply.failed_index = response.failed_check();
+      }
+      break;
+    case proto::KvResponse::TXN_ABORTED:
+      reply.outcome = TxnReply::Outcome::kAborted;
+      break;
+    case proto::KvResponse::ALREADY_COMMITTED:
+      reply.outcome = TxnReply::Outcome::kAlreadyCommitted;
+      break;
+    default:
+      return Status::Unavailable("unexpected response to a transaction command");
+  }
+  return reply;
+}
+}  // namespace
+
+Result<TxnReply> KvClient::Prewrite(const std::string& txid, const std::string& primary_key,
+                                    const std::vector<TxnKey>& keys) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::TxnRequest request;
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  proto::TxnCmd* cmd = request.mutable_cmd();
+  cmd->set_kind(proto::TxnCmd::PREWRITE);
+  cmd->set_txid(txid);
+  cmd->set_primary_key(primary_key);
+  for (const TxnKey& k : keys) {
+    proto::TxnWrite* w = cmd->add_writes();
+    w->set_key(k.key);
+    w->set_kind(k.kind);
+    w->set_value(k.value);
+    w->set_validate(k.validate);
+    w->set_expected_absent(k.expected_absent);
+    w->set_expected(k.expected);
+  }
+  proto::KvResponse response;
+  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                               proto::KvResponse* out) { return stub->Txn(ctx, request, out); },
+                           &response);
+  if (s.ErrCode() == lsm::Code::kLocked) {
+    TxnReply reply;
+    reply.outcome = TxnReply::Outcome::kLocked;
+    {
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      reply.lock = std::move(last_lock_);
+      last_lock_.reset();
+    }
+    return reply;
+  }
+  if (!s.IsOk()) {
+    return s;
+  }
+  return ToReply(response);
+}
+
+Result<TxnReply> KvClient::CommitTxn(const std::string& txid, const std::vector<std::string>& keys,
+                                     bool primary) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::TxnRequest request;
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  proto::TxnCmd* cmd = request.mutable_cmd();
+  cmd->set_kind(proto::TxnCmd::COMMIT);
+  cmd->set_txid(txid);
+  cmd->set_primary(primary);
+  for (const auto& k : keys) {
+    cmd->add_keys(k);
+  }
+  proto::KvResponse response;
+  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                               proto::KvResponse* out) { return stub->Txn(ctx, request, out); },
+                           &response);
+  if (!s.IsOk()) {
+    return s;
+  }
+  return ToReply(response);
+}
+
+Result<TxnReply> KvClient::RollbackTxn(const std::string& txid,
+                                       const std::vector<std::string>& keys) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::TxnRequest request;
+  request.set_client_id(options_.client_id);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    request.set_seq(next_seq_++);
+  }
+  proto::TxnCmd* cmd = request.mutable_cmd();
+  cmd->set_kind(proto::TxnCmd::ROLLBACK);
+  cmd->set_txid(txid);
+  for (const auto& k : keys) {
+    cmd->add_keys(k);
+  }
+  proto::KvResponse response;
+  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                               proto::KvResponse* out) { return stub->Txn(ctx, request, out); },
+                           &response);
+  if (!s.IsOk()) {
+    return s;
+  }
+  return ToReply(response);
+}
+
+Result<std::optional<std::string>> KvClient::TxnDecision(const std::string& txid) {
+  const std::lock_guard<std::mutex> op_lock(op_mutex_);
+  proto::TxnStatusRequest request;
+  request.set_txid(txid);
+  proto::KvResponse response;
+  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                               proto::KvResponse* out) { return stub->TxnStatus(ctx, request, out); },
+                           &response);
+  if (!s.IsOk()) {
+    return s;
+  }
+  if (!response.has_value()) {
+    return std::optional<std::string>{};
+  }
+  return std::optional<std::string>{response.value()};
 }
 
 }  // namespace raftkv::client

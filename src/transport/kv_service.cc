@@ -51,6 +51,9 @@ void KvGrpcService::FillFromStatus(const lsm::Status& status, proto::KvResponse*
     case lsm::Code::kMoving:
       response->set_code(proto::KvResponse::MOVING);
       break;
+    case lsm::Code::kLocked:
+      response->set_code(proto::KvResponse::LOCKED);
+      break;
     default:
       response->set_code(proto::KvResponse::INVALID);
       break;
@@ -87,6 +90,29 @@ grpc::Status KvGrpcService::Mutate(grpc::ServerContext* ctx, const proto::Comman
     response->set_code(proto::KvResponse::WRONG_SHARD);
     return grpc::Status::OK;
   }
+  const statemachine::ApplyResult& applied = *result;
+  switch (applied.txn) {
+    case statemachine::TxnOutcome::kLocked:
+      response->set_code(proto::KvResponse::LOCKED);
+      if (applied.lock.has_value()) {
+        *response->mutable_lock() = applied.lock.value();
+      }
+      return grpc::Status::OK;
+    case statemachine::TxnOutcome::kValidationFailed:
+      response->set_code(proto::KvResponse::VALIDATION_FAILED);
+      if (applied.failed_check.has_value()) {
+        response->set_failed_check(applied.failed_check.value());
+      }
+      return grpc::Status::OK;
+    case statemachine::TxnOutcome::kAborted:
+      response->set_code(proto::KvResponse::TXN_ABORTED);
+      return grpc::Status::OK;
+    case statemachine::TxnOutcome::kAlreadyCommitted:
+      response->set_code(proto::KvResponse::ALREADY_COMMITTED);
+      return grpc::Status::OK;
+    case statemachine::TxnOutcome::kNone:
+      break;
+  }
   if (result->moving) {
     response->set_code(proto::KvResponse::MOVING);
     return grpc::Status::OK;
@@ -118,9 +144,15 @@ grpc::Status KvGrpcService::Get(grpc::ServerContext* ctx, const proto::GetReques
     response->set_message("node is still starting");
     return grpc::Status::OK;
   }
-  auto got = driver_->LinearizableGet(request->key(), TimeoutFor(ctx));
+  std::optional<proto::LockRecord> lock;
+  auto got = driver_->LinearizableGet(request->key(), TimeoutFor(ctx), &lock);
   if (!got.IsOk()) {
     FillFromStatus(got.GetStatus(), response);
+    return grpc::Status::OK;
+  }
+  if (lock.has_value()) {
+    response->set_code(proto::KvResponse::LOCKED);
+    *response->mutable_lock() = std::move(*lock);
     return grpc::Status::OK;
   }
   const std::optional<std::string>& value = *got;
@@ -146,6 +178,7 @@ grpc::Status KvGrpcService::Scan(grpc::ServerContext* ctx, const proto::ScanRequ
   limit = std::min(limit, kMaxLimit);
 
   // One past the limit, only to learn whether anything remains.
+  std::optional<proto::LockRecord> lock;
   const lsm::Status s = driver_->LinearizableScan(
       request->start(), request->end(), static_cast<size_t>(limit) + 1, TimeoutFor(ctx),
       [&](std::string_view key, std::string_view value) {
@@ -157,7 +190,14 @@ grpc::Status KvGrpcService::Scan(grpc::ServerContext* ctx, const proto::ScanRequ
         pair->set_key(std::string(key));
         pair->set_value(std::string(value));
         return lsm::Status::Ok();
-      });
+      },
+      &lock);
+  if (s.IsOk() && lock.has_value()) {
+    response->clear_pairs();
+    response->set_code(proto::KvResponse::LOCKED);
+    *response->mutable_lock() = std::move(*lock);
+    return grpc::Status::OK;
+  }
   if (!s.IsOk()) {
     response->clear_pairs();
     response->clear_more();
@@ -214,6 +254,41 @@ grpc::Status KvGrpcService::Import(grpc::ServerContext* ctx, const proto::Import
   command.set_seq(request->seq());
   *command.mutable_import()->mutable_puts() = request->puts();
   return Mutate(ctx, command, response);
+}
+
+grpc::Status KvGrpcService::Txn(grpc::ServerContext* ctx, const proto::TxnRequest* request,
+                                proto::KvResponse* response) {
+  constexpr int kMaxTxnKeys = 10000;
+  if (request->cmd().writes_size() > kMaxTxnKeys || request->cmd().keys_size() > kMaxTxnKeys) {
+    response->set_code(proto::KvResponse::INVALID);
+    response->set_message("transaction is too large");
+    return grpc::Status::OK;
+  }
+  proto::Command command;
+  command.set_client_id(request->client_id());
+  command.set_seq(request->seq());
+  *command.mutable_txn() = request->cmd();
+  return Mutate(ctx, command, response);
+}
+
+grpc::Status KvGrpcService::TxnStatus(grpc::ServerContext* ctx, const proto::TxnStatusRequest* request,
+                                      proto::KvResponse* response) {
+  if (driver_ == nullptr) {
+    response->set_code(proto::KvResponse::UNAVAILABLE);
+    response->set_message("node is still starting");
+    return grpc::Status::OK;
+  }
+  auto decision = driver_->LinearizableTxnDecision(request->txid(), TimeoutFor(ctx));
+  if (!decision.IsOk()) {
+    FillFromStatus(decision.GetStatus(), response);
+    return grpc::Status::OK;
+  }
+  const std::optional<std::string>& value = *decision;
+  if (value.has_value()) {
+    response->set_value(value.value());
+  }
+  response->set_code(proto::KvResponse::OK);
+  return grpc::Status::OK;
 }
 
 grpc::Status KvGrpcService::Put(grpc::ServerContext* ctx, const proto::PutRequest* request,

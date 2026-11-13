@@ -32,6 +32,7 @@ message Command {
     BatchCmd batch = 6;
     RangeCmd range = 7;
     ImportCmd import = 8;
+    TxnCmd txn = 9;
   }
 }
 
@@ -90,6 +91,58 @@ message ImportCmd {
   repeated PutOp puts = 1;
 }
 
+// ---------------------------------------------------------------------------
+// Cross-shard transactions (two-phase commit with locks held in the data shards).
+//
+// A transaction picks one of its keys as the PRIMARY. Phase one (PREWRITE) locks
+// every key it touches, on every shard involved, and validates what it read.
+// Phase two commits the primary: that single replicated write is the decision.
+// Every other key then rolls forward, and anyone who finds a lock left behind by
+// a dead coordinator settles it by asking the primary's shard what was decided.
+// ---------------------------------------------------------------------------
+
+message LockRecord {
+  bytes txid = 1;
+  bytes primary_key = 2;
+  enum Kind {
+    // Holds the key against other writers without changing it (a key the
+    // transaction only read). Invisible to readers.
+    LOCK_ONLY = 0;
+    PUT = 1;
+    DELETE = 2;
+  }
+  Kind kind = 3;
+  // The value to install on commit, for PUT.
+  bytes value = 4;
+}
+
+message TxnWrite {
+  bytes key = 1;
+  LockRecord.Kind kind = 2;
+  bytes value = 3;
+  // Validate before locking: the key's committed value must equal `expected`,
+  // or be absent when `expected_absent`. This is how a transaction proves what
+  // it read is still true.
+  bool validate = 4;
+  bool expected_absent = 5;
+  bytes expected = 6;
+}
+
+message TxnCmd {
+  enum Kind {
+    PREWRITE = 0;
+    COMMIT = 1;
+    ROLLBACK = 2;
+  }
+  Kind kind = 1;
+  bytes txid = 2;
+  bytes primary_key = 3;
+  repeated TxnWrite writes = 4;  // PREWRITE
+  repeated bytes keys = 5;       // COMMIT, ROLLBACK
+  // COMMIT: this shard holds the primary key, so applying it IS the decision.
+  bool primary = 6;
+}
+
 // Persisted copy of the range state, kept in the state machine so it travels
 // with snapshots and survives restarts.
 message RangeState {
@@ -138,12 +191,21 @@ message CommandResult {
     // The key is outside this group's range, or inside a fenced one.
     WRONG_SHARD = 4;
     MOVING = 5;
+    // A key the command touches is locked by another transaction.
+    LOCKED = 6;
+    // PREWRITE: a validated key no longer holds the value the transaction read.
+    VALIDATION_FAILED = 7;
+    // COMMIT: the lock is gone because the transaction was rolled back.
+    TXN_ABORTED = 8;
+    // ROLLBACK: the transaction had already committed.
+    ALREADY_COMMITTED = 9;
   }
   Code code = 1;
   // Present for reads and for a CAS that reports the value it found.
   optional bytes value = 2;
   // Batch: index of the first check that failed, when code is CAS_MISMATCH.
   optional uint32 failed_check = 3;
+  optional LockRecord lock = 4;
 }
 
 // Persisted per-client session entry.
@@ -236,6 +298,16 @@ message ImportRequest {
   repeated PutOp puts = 3;
 }
 
+message TxnRequest {
+  string client_id = 1;
+  uint64 seq = 2;
+  TxnCmd cmd = 3;
+}
+
+message TxnStatusRequest {
+  bytes txid = 1;
+}
+
 message BatchRequest {
   string client_id = 1;
   uint64 seq = 2;
@@ -264,6 +336,12 @@ message KvResponse {
     // The range is being handed to another group; writes are refused until the
     // handover completes. Retry shortly.
     MOVING = 8;
+    // The key (or part of a scanned range) is locked by an in-flight
+    // transaction. `lock` names it; settle it and retry.
+    LOCKED = 9;
+    VALIDATION_FAILED = 10;
+    TXN_ABORTED = 11;
+    ALREADY_COMMITTED = 12;
   }
   Code code = 1;
   optional bytes value = 2;
@@ -274,6 +352,7 @@ message KvResponse {
   bool more = 6;
   // Batch: which check failed, when code is CAS_MISMATCH.
   optional uint32 failed_check = 7;
+  optional LockRecord lock = 8;
 }
 
 service Kv {
@@ -288,4 +367,8 @@ service Kv {
   // Shard administration, used by the split coordinator.
   rpc Range(RangeRequest) returns (KvResponse);
   rpc Import(ImportRequest) returns (KvResponse);
+  // Transaction phases, and a linearizable read of what a transaction decided.
+  rpc Txn(TxnRequest) returns (KvResponse);
+  // value is "C" (committed), "A" (aborted) or absent (no decision recorded).
+  rpc TxnStatus(TxnStatusRequest) returns (KvResponse);
 }
