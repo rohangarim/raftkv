@@ -233,6 +233,29 @@ class GrpcClusterFixture : public ::testing::Test {
     node.driver->Start();
   }
 
+  // Like WaitForLeader, but only among `ids`: with several independent Raft
+  // groups in one fixture there is one leader per group, not one in total.
+  uint64_t WaitForLeaderAmong(const std::vector<uint64_t>& ids,
+                              std::chrono::milliseconds timeout = std::chrono::milliseconds(3000)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      uint64_t leader = 0;
+      int leader_count = 0;
+      for (uint64_t id : ids) {
+        auto& node = nodes_.at(id);
+        if (node.driver && node.driver->CurrentRole() == raft::Role::kLeader) {
+          leader = id;
+          ++leader_count;
+        }
+      }
+      if (leader_count == 1) {
+        return leader;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return 0;
+  }
+
   uint64_t WaitForLeader(std::chrono::milliseconds timeout = std::chrono::milliseconds(3000)) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {

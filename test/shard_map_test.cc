@@ -45,7 +45,10 @@ TEST(ShardMapTest, OverlappingReturnsOnlyTheRangesTheScanTouches) {
   const ShardMap map = ThreeShards();
   auto ids = [](const std::vector<const ShardRange*>& rs) {
     std::vector<uint32_t> out;
-    for (const auto* r : rs) out.push_back(r->shard_id);
+    out.reserve(rs.size());
+    for (const auto* r : rs) {
+      out.push_back(r->shard_id);
+    }
     return out;
   };
   EXPECT_EQ(ids(map.Overlapping("a", "c")), (std::vector<uint32_t>{1}));

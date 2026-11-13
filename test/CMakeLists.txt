@@ -104,3 +104,8 @@ raftkv_test(raft_inflight_test
 raftkv_test(shard_map_test
   SOURCES shard_map_test.cc
   LIBS raftkv_shard)
+
+raftkv_test(sharded_client_test
+  SOURCES sharded_client_test.cc
+  LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
+  TIMEOUT 120)
