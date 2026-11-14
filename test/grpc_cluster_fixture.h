@@ -201,7 +201,8 @@ class GrpcClusterFixture : public ::testing::Test {
       addresses[peer] = nodes_.at(peer).address;
     }
     for (uint64_t peer : all_ids) {
-      if (peer != id) {
+      // A peer that is itself down will read the fresh map when it restarts.
+      if (peer != id && nodes_.at(peer).driver != nullptr) {
         nodes_.at(peer).driver->UpdatePeerAddress(id, node.address);
       }
     }
