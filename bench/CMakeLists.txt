@@ -1,3 +1,6 @@
 add_executable(raftkv_bench raftkv_bench.cc)
 target_link_libraries(raftkv_bench PRIVATE
   raftkv_client raftkv_server raftkv_transport raftkv_statemachine raftkv_common raftkv_warnings)
+
+add_executable(engine_bench engine_bench.cc)
+target_link_libraries(engine_bench PRIVATE raftkv_engine raftkv_common raftkv_warnings)

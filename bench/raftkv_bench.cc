@@ -26,9 +26,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include <grpcpp/grpcpp.h>
 #include <fcntl.h>
+#include <grpcpp/grpcpp.h>
 #include <unistd.h>
+
+#include "engine/engine.h"
 
 #include "client/kv_client.h"
 #include "client/sharded_client.h"
@@ -56,7 +58,8 @@ struct Node {
 // Three nodes, one Raft group.
 class Cluster {
  public:
-  Cluster(uint64_t first_id, const std::filesystem::path& root) {
+  Cluster(uint64_t first_id, const std::filesystem::path& root, rk::engine::Kind engine_kind)
+      : engine_kind_(engine_kind) {
     for (uint64_t i = 0; i < 3; ++i) ids_.push_back(first_id + i);
     for (uint64_t id : ids_) {
       Node n;
@@ -81,9 +84,10 @@ class Cluster {
       Node& n = nodes_[id];
       const auto dir = root / ("node" + std::to_string(id));
       std::filesystem::create_directories(dir);
-      rk::lsm::Options lo;
+      rk::engine::Options lo;
       lo.dir = dir / "state";
-      auto opened = rk::statemachine::KvStateMachine::Open(std::move(lo));
+      lo.kind = engine_kind_;
+      auto opened = rk::statemachine::KvStateMachine::Open(lo);
       if (!opened.IsOk()) {
         throw std::runtime_error("state machine: " + opened.GetStatus().ToString());
       }
@@ -136,6 +140,7 @@ class Cluster {
 
  private:
   std::vector<uint64_t> ids_;
+  rk::engine::Kind engine_kind_;
   std::map<uint64_t, Node> nodes_;
 };
 
@@ -156,7 +161,8 @@ struct Stats {
 
 double Percentile(std::vector<uint32_t>& micros, double p) {
   if (micros.empty()) return 0;
-  const size_t idx = std::min(micros.size() - 1, static_cast<size_t>(p * static_cast<double>(micros.size())));
+  const size_t idx =
+      std::min(micros.size() - 1, static_cast<size_t>(p * static_cast<double>(micros.size())));
   std::nth_element(micros.begin(), micros.begin() + static_cast<std::ptrdiff_t>(idx), micros.end());
   return static_cast<double>(micros[idx]) / 1000.0;
 }
@@ -237,6 +243,7 @@ struct Config {
   int repeat = 3;
   size_t value_size = 100;
   int batch_size = 100;
+  rk::engine::Kind engine = rk::engine::DefaultKind();
 };
 
 void Report(const std::string& name, int threads, const std::vector<Stats>& runs, const char* unit,
@@ -258,16 +265,19 @@ void Report(const std::string& name, int threads, const std::vector<Stats>& runs
     errors += r.errors;
     retries += r.retries;
   }
-  std::printf("%-22s %3d thr  %10.0f %-8s (min %.0f, max %.0f, spread %4.1f%%%s)  p50 %7.2f  p95 %7.2f  p99 %7.2f ms",
-              name.c_str(), threads, median, unit, sorted.front(), sorted.back(), spread,
-              spread > 15 ? " FLAG" : "", runs[mid].p50_ms, runs[mid].p95_ms, runs[mid].p99_ms);
+  std::printf(
+      "%-22s %3d thr  %10.0f %-8s (min %.0f, max %.0f, spread %4.1f%%%s)  p50 %7.2f  p95 %7.2f  "
+      "p99 %7.2f ms",
+      name.c_str(), threads, median, unit, sorted.front(), sorted.back(), spread,
+      spread > 15 ? " FLAG" : "", runs[mid].p50_ms, runs[mid].p95_ms, runs[mid].p99_ms);
   if (errors != 0) {
     std::printf("  errors=%llu", static_cast<unsigned long long>(errors));
     std::lock_guard<std::mutex> lock(g_error_mutex);
     std::printf(" [first: %.120s]", g_first_error.c_str());
     g_first_error.clear();
   }
-  if (retries != 0) std::printf("  conflict-retries=%llu", static_cast<unsigned long long>(retries));
+  if (retries != 0)
+    std::printf("  conflict-retries=%llu", static_cast<unsigned long long>(retries));
   std::printf("\n");
   std::fflush(stdout);
 }
@@ -291,29 +301,48 @@ int RunBench(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&] { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
-    if (a == "--workloads") cfg.workloads = split(next());
+    if (a == "--engine") {
+      auto kind = rk::engine::ParseKind(next());
+      if (!kind.IsOk() || !rk::engine::Available(*kind)) {
+        std::fprintf(stderr, "--engine: %s\n",
+                     kind.IsOk() ? "not part of this build" : kind.GetStatus().ToString().c_str());
+        return 2;
+      }
+      cfg.engine = *kind;
+    } else if (a == "--workloads")
+      cfg.workloads = split(next());
     else if (a == "--threads") {
       cfg.threads.clear();
       for (const auto& t : split(next())) cfg.threads.push_back(std::atoi(t.c_str()));
-    } else if (a == "--seconds") cfg.seconds = std::atoi(next().c_str());
-    else if (a == "--repeat") cfg.repeat = std::atoi(next().c_str());
-    else if (a == "--value-size") cfg.value_size = static_cast<size_t>(std::atoi(next().c_str()));
-    else if (a == "--batch-size") cfg.batch_size = std::atoi(next().c_str());
+    } else if (a == "--seconds")
+      cfg.seconds = std::atoi(next().c_str());
+    else if (a == "--repeat")
+      cfg.repeat = std::atoi(next().c_str());
+    else if (a == "--value-size")
+      cfg.value_size = static_cast<size_t>(std::atoi(next().c_str()));
+    else if (a == "--batch-size")
+      cfg.batch_size = std::atoi(next().c_str());
     else {
-      std::fprintf(stderr, "usage: raftkv_bench [--workloads fsync,put,batch,get,scan,txn] [--threads 1,4,16] "
-                           "[--seconds N] [--repeat N] [--value-size N] [--batch-size N]\n");
+      std::fprintf(
+          stderr,
+          "usage: raftkv_bench [--workloads fsync,put,batch,get,scan,txn] [--threads 1,4,16] "
+          "[--seconds N] [--repeat N] [--value-size N] [--batch-size N]\n");
       return 2;
     }
   }
 
-  const auto root = std::filesystem::temp_directory_path() / ("raftkv_bench_" + std::to_string(::getpid()));
+  const auto root =
+      std::filesystem::temp_directory_path() / ("raftkv_bench_" + std::to_string(::getpid()));
   std::filesystem::create_directories(root);
   auto wants = [&](const char* w) {
     return std::find(cfg.workloads.begin(), cfg.workloads.end(), w) != cfg.workloads.end();
   };
 
   std::printf("# raftkv benchmark\n");
-  std::printf("# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append\n");
+  std::printf("# storage engine: %s\n", std::string(rk::engine::KindName(cfg.engine)).c_str());
+  std::printf(
+      "# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft "
+      "log append\n");
   std::printf("# value=%zu B, %d s per measurement (+1 s warm-up), %d repeats, batch=%d keys\n\n",
               cfg.value_size, cfg.seconds, cfg.repeat, cfg.batch_size);
 
@@ -345,35 +374,37 @@ int RunBench(int argc, char** argv) {
   }
 
   {
-    Cluster cluster(1, root / "a");
+    Cluster cluster(1, root / "a", cfg.engine);
     const auto addrs = cluster.Addresses();
 
     if (wants("put")) {
       for (int threads : cfg.threads) {
         std::vector<Stats> runs;
         for (int r = 0; r < cfg.repeat; ++r) {
-          // NOLINTNEXTLINE(performance-inefficient-vector-operation): benchmark setup, not a hot path
-          runs.push_back(RunThreads(threads, cfg.seconds, [&](int t, std::atomic<bool>& stop,
-                                                               std::atomic<bool>& measuring,
-                                                               std::vector<uint32_t>& lat, uint64_t& ops,
-                                                               uint64_t& errs, uint64_t&) {
-            rk::client::KvClient c(Opts(addrs, FreshId("put")));
-            const std::string v = Value(cfg.value_size);
-            uint64_t n = 0;
-            while (!stop.load()) {
-              const auto t0 = Clock::now();
-              const auto s = c.Put(KeyN(("p" + std::to_string(r) + "-" + std::to_string(t) + "-").c_str(), n++), v);
-              if (measuring.load()) {
-                if (s.IsOk()) {
-                  lat.push_back(Micros(t0));
-                  ++ops;
-                } else {
-                  ++errs;
-                  NoteError("put: " + s.ToString());
+          // NOLINTNEXTLINE(performance-inefficient-vector-operation): setup, not a hot path
+          runs.push_back(RunThreads(
+              threads, cfg.seconds,
+              [&](int t, std::atomic<bool>& stop, std::atomic<bool>& measuring,
+                  std::vector<uint32_t>& lat, uint64_t& ops, uint64_t& errs, uint64_t&) {
+                rk::client::KvClient c(Opts(addrs, FreshId("put")));
+                const std::string v = Value(cfg.value_size);
+                uint64_t n = 0;
+                while (!stop.load()) {
+                  const auto t0 = Clock::now();
+                  const auto s = c.Put(
+                      KeyN(("p" + std::to_string(r) + "-" + std::to_string(t) + "-").c_str(), n++),
+                      v);
+                  if (measuring.load()) {
+                    if (s.IsOk()) {
+                      lat.push_back(Micros(t0));
+                      ++ops;
+                    } else {
+                      ++errs;
+                      NoteError("put: " + s.ToString());
+                    }
+                  }
                 }
-              }
-            }
-          }));
+              }));
         }
         Report("put (1 key/request)", threads, runs, "ops/s");
       }
@@ -383,33 +414,37 @@ int RunBench(int argc, char** argv) {
       for (int threads : {1, 4}) {
         std::vector<Stats> runs;
         for (int r = 0; r < cfg.repeat; ++r) {
-          // NOLINTNEXTLINE(performance-inefficient-vector-operation): benchmark setup, not a hot path
-          runs.push_back(RunThreads(threads, cfg.seconds, [&](int t, std::atomic<bool>& stop,
-                                                               std::atomic<bool>& measuring,
-                                                               std::vector<uint32_t>& lat, uint64_t& ops,
-                                                               uint64_t& errs, uint64_t&) {
-            rk::client::KvClient c(Opts(addrs, FreshId("batch")));
-            const std::string v = Value(cfg.value_size);
-            uint64_t n = 0;
-            while (!stop.load()) {
-              std::vector<rk::client::BatchWrite> writes;
-              writes.reserve(static_cast<size_t>(cfg.batch_size));
-              for (int i = 0; i < cfg.batch_size; ++i) {
-                writes.push_back({KeyN(("b" + std::to_string(r) + "-" + std::to_string(t) + "-").c_str(), n++), v});
-              }
-              const auto t0 = Clock::now();
-              auto o = c.Batch({}, writes);
-              if (measuring.load()) {
-                if (o.IsOk() && o->applied) {
-                  lat.push_back(Micros(t0));
-                  ++ops;
-                } else {
-                  ++errs;
-                  NoteError(o.IsOk() ? "batch: not applied" : "batch: " + o.GetStatus().ToString());
+          // NOLINTNEXTLINE(performance-inefficient-vector-operation): setup, not a hot path
+          runs.push_back(RunThreads(
+              threads, cfg.seconds,
+              [&](int t, std::atomic<bool>& stop, std::atomic<bool>& measuring,
+                  std::vector<uint32_t>& lat, uint64_t& ops, uint64_t& errs, uint64_t&) {
+                rk::client::KvClient c(Opts(addrs, FreshId("batch")));
+                const std::string v = Value(cfg.value_size);
+                uint64_t n = 0;
+                while (!stop.load()) {
+                  std::vector<rk::client::BatchWrite> writes;
+                  writes.reserve(static_cast<size_t>(cfg.batch_size));
+                  for (int i = 0; i < cfg.batch_size; ++i) {
+                    writes.push_back(
+                        {KeyN(("b" + std::to_string(r) + "-" + std::to_string(t) + "-").c_str(),
+                              n++),
+                         v});
+                  }
+                  const auto t0 = Clock::now();
+                  auto o = c.Batch({}, writes);
+                  if (measuring.load()) {
+                    if (o.IsOk() && o->applied) {
+                      lat.push_back(Micros(t0));
+                      ++ops;
+                    } else {
+                      ++errs;
+                      NoteError(o.IsOk() ? "batch: not applied"
+                                         : "batch: " + o.GetStatus().ToString());
+                    }
+                  }
                 }
-              }
-            }
-          }));
+              }));
         }
         Report("batch write", threads, runs, "keys/s", static_cast<double>(cfg.batch_size));
       }
@@ -421,7 +456,8 @@ int RunBench(int argc, char** argv) {
       rk::client::KvClient loader(Opts(addrs, FreshId("loader")));
       for (uint64_t base = 0; base < kKeys; base += 500) {
         std::vector<rk::client::BatchWrite> w;
-        for (uint64_t i = base; i < base + 500; ++i) w.push_back({KeyN("d", i), Value(cfg.value_size)});
+        for (uint64_t i = base; i < base + 500; ++i)
+          w.push_back({KeyN("d", i), Value(cfg.value_size)});
         if (!loader.Batch({}, w).IsOk()) {
           std::fprintf(stderr, "load failed\n");
           return 1;
@@ -431,26 +467,26 @@ int RunBench(int argc, char** argv) {
         for (int threads : cfg.threads) {
           std::vector<Stats> runs;
           for (int r = 0; r < cfg.repeat; ++r) {
-            // NOLINTNEXTLINE(performance-inefficient-vector-operation): benchmark setup, not a hot path
-            runs.push_back(RunThreads(threads, cfg.seconds, [&](int t, std::atomic<bool>& stop,
-                                                                 std::atomic<bool>& measuring,
-                                                                 std::vector<uint32_t>& lat, uint64_t& ops,
-                                                                 uint64_t& errs, uint64_t&) {
-              rk::client::KvClient c(Opts(addrs, FreshId("get")));
-              std::mt19937_64 rng(static_cast<uint64_t>(t) + 7);
-              while (!stop.load()) {
-                const auto t0 = Clock::now();
-                auto g = c.Get(KeyN("d", rng() % kKeys));
-                if (measuring.load()) {
-                  if (g.IsOk()) {
-                    lat.push_back(Micros(t0));
-                    ++ops;
-                  } else {
-                    ++errs;
+            // NOLINTNEXTLINE(performance-inefficient-vector-operation): setup, not a hot path
+            runs.push_back(RunThreads(
+                threads, cfg.seconds,
+                [&](int t, std::atomic<bool>& stop, std::atomic<bool>& measuring,
+                    std::vector<uint32_t>& lat, uint64_t& ops, uint64_t& errs, uint64_t&) {
+                  rk::client::KvClient c(Opts(addrs, FreshId("get")));
+                  std::mt19937_64 rng(static_cast<uint64_t>(t) + 7);
+                  while (!stop.load()) {
+                    const auto t0 = Clock::now();
+                    auto g = c.Get(KeyN("d", rng() % kKeys));
+                    if (measuring.load()) {
+                      if (g.IsOk()) {
+                        lat.push_back(Micros(t0));
+                        ++ops;
+                      } else {
+                        ++errs;
+                      }
+                    }
                   }
-                }
-              }
-            }));
+                }));
           }
           Report("get (linearizable)", threads, runs, "ops/s");
         }
@@ -459,26 +495,26 @@ int RunBench(int argc, char** argv) {
         for (int threads : {1, 4}) {
           std::vector<Stats> runs;
           for (int r = 0; r < cfg.repeat; ++r) {
-            // NOLINTNEXTLINE(performance-inefficient-vector-operation): benchmark setup, not a hot path
-            runs.push_back(RunThreads(threads, cfg.seconds, [&](int t, std::atomic<bool>& stop,
-                                                                 std::atomic<bool>& measuring,
-                                                                 std::vector<uint32_t>& lat, uint64_t& ops,
-                                                                 uint64_t& errs, uint64_t&) {
-              rk::client::KvClient c(Opts(addrs, FreshId("scan")));
-              std::mt19937_64 rng(static_cast<uint64_t>(t) + 11);
-              while (!stop.load()) {
-                const auto t0 = Clock::now();
-                auto page = c.Scan(KeyN("d", rng() % (kKeys - 200)), "", 100);
-                if (measuring.load()) {
-                  if (page.IsOk()) {
-                    lat.push_back(Micros(t0));
-                    ++ops;
-                  } else {
-                    ++errs;
+            // NOLINTNEXTLINE(performance-inefficient-vector-operation): setup, not a hot path
+            runs.push_back(RunThreads(
+                threads, cfg.seconds,
+                [&](int t, std::atomic<bool>& stop, std::atomic<bool>& measuring,
+                    std::vector<uint32_t>& lat, uint64_t& ops, uint64_t& errs, uint64_t&) {
+                  rk::client::KvClient c(Opts(addrs, FreshId("scan")));
+                  std::mt19937_64 rng(static_cast<uint64_t>(t) + 11);
+                  while (!stop.load()) {
+                    const auto t0 = Clock::now();
+                    auto page = c.Scan(KeyN("d", rng() % (kKeys - 200)), "", 100);
+                    if (measuring.load()) {
+                      if (page.IsOk()) {
+                        lat.push_back(Micros(t0));
+                        ++ops;
+                      } else {
+                        ++errs;
+                      }
+                    }
                   }
-                }
-              }
-            }));
+                }));
           }
           Report("scan 100 rows", threads, runs, "rows/s", 100.0);
         }
@@ -488,10 +524,10 @@ int RunBench(int argc, char** argv) {
 
   if (wants("txn")) {
     // Two shards. Accounts "acct-a<i>" live on shard 1, "acct-z<i>" on shard 2.
-    Cluster c1(1, root / "s1");
-    Cluster c2(4, root / "s2");
-    auto map = rk::shard::ShardMap::Create(
-        {{1, "", c1.Addresses()}, {2, "acct-m", c2.Addresses()}});
+    Cluster c1(1, root / "s1", cfg.engine);
+    Cluster c2(4, root / "s2", cfg.engine);
+    auto map =
+        rk::shard::ShardMap::Create({{1, "", c1.Addresses()}, {2, "acct-m", c2.Addresses()}});
     if (!map.IsOk()) return 1;
     constexpr int kAccounts = 500;
     {
@@ -505,46 +541,47 @@ int RunBench(int argc, char** argv) {
       for (int threads : {1, 4, 8}) {
         std::vector<Stats> runs;
         for (int r = 0; r < cfg.repeat; ++r) {
-          // NOLINTNEXTLINE(performance-inefficient-vector-operation): benchmark setup, not a hot path
-          runs.push_back(RunThreads(threads, cfg.seconds, [&](int t, std::atomic<bool>& stop,
-                                                               std::atomic<bool>& measuring,
-                                                               std::vector<uint32_t>& lat, uint64_t& ops,
-                                                               uint64_t& errs, uint64_t& retries) {
-            rk::client::ShardedClient client(
-                *map, Opts({}, FreshId("txn")));
-            std::mt19937_64 rng(static_cast<uint64_t>(t) * 31 + 5);
-            while (!stop.load()) {
-              const int i = static_cast<int>(rng() % kAccounts);
-              int j = static_cast<int>(rng() % kAccounts);
-              // Same-shard transfer: both on shard 1. Cross-shard: one on each.
-              const std::string from = "acct-a" + std::to_string(i);
-              std::string to = (cross ? "acct-z" : "acct-a") + std::to_string(j);
-              if (to == from) continue;
-              const auto t0 = Clock::now();
-              bool done = false;
-              for (int attempt = 0; attempt < 20 && !done; ++attempt) {
-                auto txn = client.Begin();
-                auto f = txn.Get(from);
-                auto g = txn.Get(to);
-                if (!f.IsOk() || !g.IsOk()) break;
-                txn.Put(from, std::to_string(std::stoi(**f) - 1));
-                txn.Put(to, std::to_string(std::stoi(**g) + 1));
-                auto ok = txn.Commit();
-                if (!ok.IsOk()) break;
-                if (*ok) done = true;
-                else if (measuring.load()) ++retries;
-              }
-              if (measuring.load()) {
-                if (done) {
-                  lat.push_back(Micros(t0));
-                  ++ops;
-                } else {
-                  ++errs;
-                  NoteError("transfer: gave up after retries or an error");
+          // NOLINTNEXTLINE(performance-inefficient-vector-operation): setup, not a hot path
+          runs.push_back(RunThreads(
+              threads, cfg.seconds,
+              [&](int t, std::atomic<bool>& stop, std::atomic<bool>& measuring,
+                  std::vector<uint32_t>& lat, uint64_t& ops, uint64_t& errs, uint64_t& retries) {
+                rk::client::ShardedClient client(*map, Opts({}, FreshId("txn")));
+                std::mt19937_64 rng(static_cast<uint64_t>(t) * 31 + 5);
+                while (!stop.load()) {
+                  const int i = static_cast<int>(rng() % kAccounts);
+                  int j = static_cast<int>(rng() % kAccounts);
+                  // Same-shard transfer: both on shard 1. Cross-shard: one on each.
+                  const std::string from = "acct-a" + std::to_string(i);
+                  std::string to = (cross ? "acct-z" : "acct-a") + std::to_string(j);
+                  if (to == from) continue;
+                  const auto t0 = Clock::now();
+                  bool done = false;
+                  for (int attempt = 0; attempt < 20 && !done; ++attempt) {
+                    auto txn = client.Begin();
+                    auto f = txn.Get(from);
+                    auto g = txn.Get(to);
+                    if (!f.IsOk() || !g.IsOk()) break;
+                    txn.Put(from, std::to_string(std::stoi(**f) - 1));
+                    txn.Put(to, std::to_string(std::stoi(**g) + 1));
+                    auto ok = txn.Commit();
+                    if (!ok.IsOk()) break;
+                    if (*ok)
+                      done = true;
+                    else if (measuring.load())
+                      ++retries;
+                  }
+                  if (measuring.load()) {
+                    if (done) {
+                      lat.push_back(Micros(t0));
+                      ++ops;
+                    } else {
+                      ++errs;
+                      NoteError("transfer: gave up after retries or an error");
+                    }
+                  }
                 }
-              }
-            }
-          }));
+              }));
         }
         Report(cross ? "transfer, cross-shard" : "transfer, one shard", threads, runs, "txn/s");
       }
