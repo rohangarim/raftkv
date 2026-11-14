@@ -15,59 +15,14 @@ leader being killed with a real `SIGKILL`, and a node that falls far behind
 catches up from a snapshot instead of the log it no longer has.
 
 Performance numbers are below, each backed by raw output in `results/`; no file,
-no number. 324 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
-timing-sensitive test failed once under load in an ASan run and passed on
-rerun; the raw output is in `results/`). The Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
-dropped, delayed and duplicated messages) checking all five safety invariants
-after every step. See [`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md) for what's
-been audited and what can't be claimed yet.
-
-## Performance
-
-Measured on an Apple M4 laptop with `bench/raftkv_bench`: a 3-node Raft group
-(two groups for the transaction rows) in **one process on loopback**, real gRPC,
-real disk, 100-byte values, median of 3 repeats of 4 s
-([`results/49`](results/49_raftkv_bench_no_commit_persist.txt)). That means no
-real network between nodes and clients sharing cores with the servers, so these
-describe the software on this machine, not a deployment.
-
-| Operation | Threads | Rate | p50 latency |
-|---|---:|---:|---:|
-| Write, one key per request | 1 | 87 ops/s | 11 ms |
-| Write, one key per request | 16 | 309 ops/s | 52 ms |
-| Write, 100 keys per batch | 1 | 8.4K keys/s | 12 ms |
-| Linearizable read | 1 / 4 | 6.0K / 11.3K ops/s | 0.17 / 0.35 ms |
-| Scan, 100 rows | 1 | 29K rows/s | 3.4 ms |
-| Transfer, both accounts on one shard | 1 | 80 txn/s | 12 ms |
-| Transfer, accounts on two shards | 1 | 20 txn/s | 50 ms |
-
-**Writes are bound by fsync.** On macOS the log syncs with `F_FULLFSYNC`, the
-only call that really flushes the drive cache; it costs about 4 ms here, and a
-replicated write pays it on the leader and again on a follower before it can be
-acknowledged. A single writer can't beat that. Concurrent writers share syncs
-(group commit): 16 threads went from 140 to 309 ops/s, while 1 thread stayed at
-about 85 ([`results/52`](results/52_raftkv_bench_ab_group_commit.txt), median of
-4 alternating runs against the previous build). It's still far from linear in
-threads. Batching many keys into one entry remains the bigger lever: 100 keys in
-one entry is roughly 100x the key rate.
-
-**One change made this about twice as fast.** The commit index used to be saved
-on every advance, a temp-file write plus a full fsync plus a rename plus a
-directory fsync on every node's critical path, even though Raft doesn't need it to
-be durable. Not saving it halved the write latency (A/B, alternating runs of the
-old and new binaries, 4 rounds: one-key writes 38 to 72 ops/s, 100-key batches
-3.6K to 7.7K keys/s;
-[`results/50`](results/50_raftkv_bench_ab_commit_persist.txt)). Reads and scans
-are unaffected, and the first baseline run
-([`results/48`](results/48_raftkv_bench_baseline.txt)) was noisier than the later
-ones, which is why that comparison uses alternating runs.
-
-Run it yourself:
-
-```bash
-cmake --build --preset default --target raftkv_bench
-build/bench/raftkv_bench --seconds 4 --repeat 3
-```
+no number. 433 tests (one skipped by design), clang-tidy clean. The whole suite
+ran green under ASan, UBSan and TSan before the storage-engine work below; since
+then only the engine suite has been run under all three (`results/62`), so
+treat the sanitizer claim as partly stale. The Raft core also runs 2000
+randomized fault scenarios (partitions, crashes, dropped, delayed and duplicated
+messages) checking all five safety invariants after every step. See
+[`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md) for what's been audited and what
+can't be claimed yet.
 
 ## Build
 
@@ -96,6 +51,25 @@ node's LSM engine, which is the replicated state machine.
 The interesting part is the seam between Raft and storage. It's one narrow
 interface (`src/statemachine/state_machine.h`) and the consensus core knows
 nothing about how bytes reach a disk.
+
+## Two storage engines
+
+What Raft applies to is behind one interface (`src/engine/engine.h`), with two
+implementations: `builtin`, a small LSM written for this project
+(`src/minilsm/`), and `lsmtree`, the standalone
+[embedded-lsm-kv](https://github.com/rohangarim/embedded-lsm-kv) engine, fetched
+by commit SHA. Pick one with `--engine` or `RAFTKV_ENGINE=lsmtree`. The same
+conformance and state-machine tests run against both, and so does the
+linearizability campaign.
+
+Measured on a shared machine (load 4-7, raw output and caveats in
+[`results/60`](results/60_engine_bench_ab.txt),
+[`results/61`](results/61_raftkv_bench_ab_engines.txt) and D-0061): through a
+3-node cluster, 100-row scans ran about 7-8x faster on lsmtree, while writes,
+linearizable gets and transactions were within noise (they're bound by fsync
+and round trips), and 1-key puts were about 0.8x. Running lsmtree turned up a
+real bug in it (a batch's sequence is published before its writes, so a reader
+can see half a batch); the adapter guards against it (D-0060).
 
 ## Three decisions worth knowing about
 
@@ -188,12 +162,16 @@ a retry after a lost reply is too rare in this setup for 1,100 operations to hit
   and a coordinator that dies is cleaned up after by whoever meets its locks.
   But reads are validated key by key, not by range, so a transaction can't
   guard against phantom inserts, and contended keys retry rather than queue.
-- **Client sessions never expire**, and storage uses full compaction rather
-  than leveled.
+- **Client sessions never expire**, and the built-in engine uses full
+  compaction rather than leveled (lsmtree is leveled).
+- **Raft snapshots still pause applies.** The driver holds its apply lock while
+  it snapshots, so lsmtree's non-blocking scans don't yet make snapshots
+  non-blocking (D-0059 has the plan).
 
 ```
 proto/   wire format           src/raft/        consensus core
-src/lsm/ storage engine        src/statemachine/ what Raft applies to
+src/engine/ storage interface  src/statemachine/ what Raft applies to
+src/minilsm/ built-in engine   (lsmtree is fetched, not vendored)
 src/storage/ durable log       src/server/      node process + driver
 src/client/  leader-aware client   test/        unit, cluster and gRPC tests
 ```

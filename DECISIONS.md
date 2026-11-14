@@ -1543,3 +1543,168 @@ acknowledged and all present afterwards.
 holds one shard's keys in memory while planning (`max_keys_per_shard` bounds
 that); it never merges shards; and a skewed key distribution can make the median of a
 *prefix* of the shard a poor split point if the count stops early.
+
+## D-0059: Storage is an interface; lsmtree is a second engine behind it
+
+**Phase:** post-10, building on the standalone engine
+(github.com/rohangarim/embedded-lsm-kv).
+
+**What:** `src/engine/engine.h` is the whole contract the state machine needs:
+`Get`, an atomic `Write(Batch)`, `Scan[lo,hi)` with a limit, `ScanAll` (a
+consistent image), `SyncWal` (a durability barrier) and `DestroyContents`.
+`RAFTKV_ENGINE=builtin|lsmtree` (or `--engine`) picks the implementation. The
+original mini engine moved from `src/lsm/` to `src/minilsm/` and is the
+`builtin` adapter; the user's engine is the `lsmtree` adapter. lsmtree is
+fetched by full commit SHA (`RAFTKV_LSMTREE_SHA`, `scripts/fetch_lsmtree.sh`)
+and its headers are visible to exactly one translation unit
+(`lsmtree_engine.cc`, pimpl).
+
+**Why the move:** lsmtree's include prefix is `lsm/` and its namespace is the
+global `lsm`; ours was also `src/lsm/`. Two trees with the same prefix cannot
+share an include path, and renaming a dependency's include directory is worse
+than renaming our own. The C++ namespace stays `raftkv::lsm`; only the
+directory and 53 include sites in 32 files changed. This is a finding for the
+lsmtree owner too: a more specific include prefix would have avoided it.
+
+**How it is checked:** `engine_conformance_test` runs the same cases against
+every available engine: reopen recovery, `SIGKILL` after a barrier, scan
+bounds/limits/ordering, deletes, binary and prefix keys, random operations
+against a `std::map`, readers during `DestroyContents`, a reader never seeing
+half of a batch (D-0060). `state_machine_test` is parameterised over the engine
+too. `scripts/ci.sh` reruns each preset's suite with `RAFTKV_ENGINE=lsmtree`.
+
+**Not done:** `ScanAll` is a pure virtual rather than a `NewSnapshot()` handle.
+The driver still holds `apply_mutex_` while it takes a Raft snapshot (sync,
+serialise, fsynced save, log compaction), so an engine whose scans do not block
+writers does not yet make snapshots non-blocking end to end. That needs
+`Engine::NewSnapshot()` plus a driver restructure; it is the next step (read
+from the code, not measured). D-0037 still applies: the snapshot trigger must
+use the state machine's own applied index.
+
+## D-0060: lsmtree publishes a batch's sequence before its writes: torn reads
+
+**Phase:** post-10.
+
+**What was found:** in the pinned lsmtree commit `DB::Write` advances
+`last_sequence_` by the batch size *before* inserting the batch's entries into
+the memtable. LevelDB publishes after. A reader that takes its snapshot
+sequence in between can see some of a batch's keys and not others, which breaks
+the "a batch is atomic" property the state machine depends on (an applied
+command and its session record are one batch).
+`AReaderNeverSeesHalfOfABatch` fails on lsmtree without the guard below.
+
+**What the adapter does:** a reader-writer lock around the engine: `Write` takes
+it exclusively, `Get` shared; scans and `ScanAll` pin their iterator and then
+iterate without holding it. `kGuardReadAtomicity` in `lsmtree_engine.cc` turns
+it off. Mutation check: with it off, `AReaderNeverSeesHalfOfABatch/lsmtree`
+fails; with it on it passes.
+
+**What the mutation check did NOT show:** `KvClientTest.
+ConcurrentScansNeverSeeHalfOfAnAtomicBatch` (end to end) passed 3 of 3 with the
+guard off. The replicated path does not expose the torn read today, most likely
+because scans and applies are serialised by the driver. So the guard is
+defence for the engine's own contract, and the end-to-end test guards the
+property but is not evidence that the guard is needed.
+
+**Cost of the guard:** every write takes an exclusive lock. End to end, 1-key
+puts were 0.83x (1 thread) and 0.81x (16 threads) of builtin in
+`results/61_raftkv_bench_ab_engines.txt`, consistently across all three rounds.
+Whether the guard is the cause was not isolated.
+
+**For the lsmtree owner:** publish `last_sequence_` after the memtable inserts
+(a one-line move); `AReaderNeverSeesHalfOfABatch` in
+`test/engine_conformance_test.cc` is a ready regression test. Then the guard
+can be deleted.
+
+## D-0061: What each adapter promises, and what the engines measured
+
+**Phase:** post-10.
+
+**Semantics chosen.** `SyncWal` on lsmtree is `FlushMemTable()`: lsmtree has no
+public WAL sync, and a flush is a correct (if heavier) barrier because
+rotating the memtable closes the old WAL. Apply-path writes use the `kNever`
+sync policy, the same bargain as D-0014: the Raft log is the durability
+backstop and the driver calls `SyncWal` before it compacts the log. An empty
+batch returns early and syncs nothing. `DestroyContents` waits for pinned
+iterators, removes the directory and reopens. Memtable sizes at or below about
+4 KiB make lsmtree flush on every write (its arena allocates 4 KiB blocks), so
+tests use 8 KiB and above. Also for the lsmtree owner: a native `SyncWal()`, and
+the 40-59 ms an empty-directory `Open` takes (builtin: 0.3 ms), which I
+attribute to its fsyncs but did not isolate.
+
+**Engine level** (`results/60_engine_bench_ab.txt`: 3 rounds, builtin and
+lsmtree alternating within each; load before each run 4.6-6.2 on 10 cores,
+shared machine; 200,000 keys, 100 B values, 4 threads where threaded). Medians:
+
+| | builtin | lsmtree |
+|---|---|---|
+| open empty dir | 0.32 ms | 40-59 ms (all three) |
+| 3-op atomic batch, 1 thread | 74,380 /s | 129,877 /s |
+| point get, 1 thread | 137,594 /s | 513,344 /s |
+| point get, 4 threads | 305,402 /s (205k-311k) | 698,299 /s (680k-918k) |
+| scan 100 rows, bounded | 1,047,458 rows/s | 4,504,261 rows/s |
+| scan 100 rows, open-ended | 1,155 rows/s | 4,761,352 rows/s |
+| full 200,065-row snapshot scan | 1.508 s | 0.040 s |
+
+The open-ended scan is slow on the builtin engine because it materialises the
+whole range before returning the first 100 rows. The 4-thread get numbers moved
+a lot with machine load (an earlier run at load ~3 gave 381k vs 1.49M), so only
+the spread, not a ratio, is a safe claim there.
+
+**Not claimed:** the builtin writer's worst single-batch latency was 1.0-1.2 s
+in every window, *including* "writer alone", so those stalls are not caused by
+the concurrent scan and their cause was not isolated. lsmtree's was 4-13 ms.
+
+**End to end** (`results/61_raftkv_bench_ab_engines.txt`, three nodes, 3 rounds
+alternating, load 3.6-7.1): 100-row scans 59,875 vs 508,178 rows/s (1 thread,
+8.5x) and 145,586 vs 985,285 (4 threads, 6.8x). Linearizable gets 1.02-1.05x
+and transactions 0.91-1.01x, i.e. no difference outside noise: those are
+fsync- and round-trip-bound. Puts were *slower* on lsmtree (see D-0060).
+
+**A conclusion retracted.** An early non-interleaved run suggested lsmtree was
+flaky under the test suite. Interleaved, builtin and lsmtree failed
+indistinguishably (Fisher exact p = 0.58, computed in-session; the raw counts
+were not committed, so treat the figure as unverified), and the hypothesis that
+Open's fsyncs caused it was tested and refuted. The conclusion
+was an artefact of running one engine's suite first and the other's later while
+load drifted. `scripts/ab_engines.sh` exists so that cannot recur.
+
+## D-0062: Two shutdown races the second storage engine made visible
+
+**Phase:** post-10.
+
+**What happened:** the node-kill campaign (D-0055) crashed with `SIGSEGV` on
+seed 3 under lsmtree in 2 of 6 runs. lsmtree opens far more slowly than the
+builtin engine, which widens the window in which a restarting node's gRPC
+server is already listening with no driver attached.
+
+1. `RaftGrpcService::RequestVote` dereferenced its driver without the null check
+   the other two handlers had (stack: `RequestVote` ->
+   `RaftDriver::HandleRequestVote` with a null `this`). D-0055 recorded a null
+   driver as a fixture-only bug; this was the production handler. Fixed: each
+   handler reads the pointer once through `std::atomic_load` and answers
+   `UNAVAILABLE` when it is empty. `RaftGrpcServiceTest.
+   RpcsBeforeTheDriverIsAttachedAreUnavailable` covers it; with the check
+   removed from `RequestVote` the test process dies, with it restored the test
+   passes.
+2. After that fix, one run of seed 2 on the *builtin* engine aborted with
+   `bad_weak_ptr`. The crash report's stack: a `DispatchOutbound` sender thread
+   in `RaftDriver::SendOne` creating a call on a gRPC channel that was being
+   destroyed. `Stop()` waited for in-flight senders, but an inbound handler can
+   still run after that wait (the fixture stops the driver before the server)
+   and start a new detached sender. Fixed: `Stop()` sets `stopped_` under
+   `inflight_mutex_`, and `DispatchOutbound` drops messages once it is set.
+
+**Evidence, honestly:** (2) was seen once in about 60 runs and did not
+reproduce in 25 further plain runs or 12 under a debugger, so there is no
+before/after rate. The case for the fix is the stack plus the ordering argument
+(a sender is counted under the lock before it starts; one running after
+`Stop()`'s wait must have been counted after it). There is **no deterministic
+regression test** for (2): provoking it needs a leader emitting outbound traffic
+from an inbound handler after `Stop()`.
+
+After both fixes: seeds 1-6 on both engines plus 6 more rounds of seeds 2 and 3
+(36 runs, engines alternating, load 2.6-5.2) all passed
+(`results/63_linearizability_both_engines.txt`). With failures at roughly 1 in
+60 to 1 in 3 depending on the bug, a clean streak this size is weak evidence;
+the stacks and the ordering argument are the real case.
