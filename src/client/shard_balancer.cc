@@ -13,11 +13,11 @@ Result<std::optional<SplitPlan>> ShardBalancer::Plan() {
   if (!loaded.IsOk()) {
     return loaded.GetStatus();
   }
-  if (!loaded->has_value()) {
+  const std::optional<shard::ShardMap> stored = loaded.TakeValue();
+  if (!stored) {
     return std::optional<SplitPlan>{};
   }
-  const std::optional<shard::ShardMap>& stored = *loaded;
-  const shard::ShardMap& map = stored.value();
+  const shard::ShardMap& map = *stored;
 
   for (size_t i = 0; i < map.Ranges().size(); ++i) {
     const shard::ShardRange& range = map.Ranges()[i];
@@ -60,10 +60,11 @@ Result<bool> ShardBalancer::RunOnce(const Provision& provision) {
   if (!plan.IsOk()) {
     return plan.GetStatus();
   }
-  if (!plan->has_value()) {
+  const std::optional<SplitPlan> planned = plan.TakeValue();
+  if (!planned) {
     return false;
   }
-  const SplitPlan chosen = plan->value();
+  const SplitPlan chosen = *planned;
 
   auto addresses = provision();
   if (!addresses.IsOk()) {
@@ -74,10 +75,11 @@ Result<bool> ShardBalancer::RunOnce(const Provision& provision) {
   if (!loaded.IsOk()) {
     return loaded.GetStatus();
   }
-  if (!loaded->has_value()) {
+  const std::optional<shard::ShardMap> stored = loaded.TakeValue();
+  if (!stored) {
     return Status::Unavailable("the shard map disappeared while planning a split");
   }
-  const shard::ShardMap& current = loaded->value();
+  const shard::ShardMap& current = *stored;
   uint32_t next_id = 0;
   for (const auto& r : current.Ranges()) {
     next_id = std::max(next_id, r.shard_id);

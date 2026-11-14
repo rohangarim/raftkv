@@ -47,9 +47,10 @@ uint16_t FreePort() {
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   addr.sin_port = 0;
-  (void)::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  const int bound = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  EXPECT_EQ(bound, 0);
   socklen_t len = sizeof(addr);
-  (void)::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
+  EXPECT_EQ(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len), 0);
   const uint16_t port = ntohs(addr.sin_port);
   ::close(fd);
   return port;
