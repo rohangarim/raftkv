@@ -702,6 +702,26 @@ TEST_F(StateMachineTest, CheckRangeJudgesReadsAndScans) {
   EXPECT_EQ(sm_->CheckRange("a", "h", false), RangeVerdict::kWrongShard);
 }
 
+// Start "" and end "" mean "the whole key space" for a scan, but for a point
+// check they mean "the key empty string". A shard that had given away the top
+// of its range answered an unbounded scan with only the part it still held,
+// because the scan was judged as a single-key lookup. The span forms always
+// treat the arguments as a range.
+TEST_F(StateMachineTest, AnUnboundedScanIsNotMistakenForAPointLookup) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "m", false, 1)).status.IsOk());
+  EXPECT_EQ(sm_->CheckSpan("", ""), RangeVerdict::kWrongShard) << "the range ends at m, a scan to the end spills past it";
+  EXPECT_EQ(sm_->CheckSpan("", "m"), RangeVerdict::kOk);
+  EXPECT_EQ(sm_->CheckSpan("a", "z"), RangeVerdict::kWrongShard);
+  EXPECT_EQ(sm_->CheckRange("", "", false), RangeVerdict::kOk) << "as a point, the key \"\" is owned";
+}
+
+TEST_F(StateMachineTest, AnUnboundedScanSeesALockThatAPointCheckOfTheEmptyKeyDoesNot) {
+  ASSERT_TRUE(Apply(1, EncodePut("c", 1, "a", "old")).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "new"}})).status.IsOk());
+  EXPECT_FALSE(sm_->FindBlockingLock("", "").has_value()) << "this is a lookup of the key \"\"";
+  EXPECT_TRUE(sm_->FindBlockingLockInSpan("", "").has_value()) << "a scan of everything must meet the lock on a";
+}
+
 TEST_F(StateMachineTest, AnUnboundedRangeOwnsEverythingFromItsStart) {
   ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "m", "", true, 1)).status.IsOk());
   EXPECT_EQ(sm_->CheckRange("zzzz", "zzzz", false), RangeVerdict::kOk);

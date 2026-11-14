@@ -712,10 +712,10 @@ Status RaftDriver::LinearizableScan(
     const std::function<Status(std::string_view, std::string_view)>& fn,
     std::optional<proto::LockRecord>* lock) {
   RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
-  if (state_machine_->CheckRange(start, end, false) != statemachine::RangeVerdict::kOk) {
+  if (state_machine_->CheckSpan(start, end) != statemachine::RangeVerdict::kOk) {
     return Status::WrongShard("scan range is not inside this group's range");
   }
-  std::optional<proto::LockRecord> blocking = state_machine_->FindBlockingLock(start, end);
+  std::optional<proto::LockRecord> blocking = state_machine_->FindBlockingLockInSpan(start, end);
   if (blocking.has_value()) {
     if (lock == nullptr) {
       return Status::Locked("range holds a key locked by an in-flight transaction");

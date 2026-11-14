@@ -56,6 +56,9 @@ class KvStateMachine final : public StateMachine {
                           bool write) const override;
   std::optional<proto::LockRecord> FindBlockingLock(std::string_view start,
                                                     std::string_view end) const override;
+  RangeVerdict CheckSpan(std::string_view start, std::string_view end) const override;
+  std::optional<proto::LockRecord> FindBlockingLockInSpan(std::string_view start,
+                                                          std::string_view end) const override;
   Result<std::optional<std::string>> TxnDecision(std::string_view txid) const override;
   Status Sync() override;
 

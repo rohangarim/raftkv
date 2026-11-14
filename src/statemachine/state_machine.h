@@ -151,6 +151,21 @@ class StateMachine {
   virtual std::optional<proto::LockRecord> FindBlockingLock(std::string_view start,
                                                             std::string_view end) const = 0;
 
+  // Span forms of the two checks above, for scans. In CheckRange and
+  // FindBlockingLock `start == end` means one key, which makes a scan of the
+  // whole key space (start "" and end "" for "unbounded") indistinguishable from
+  // a lookup of the key "": such a scan was judged as a single key, so a shard
+  // that had given away half its range still answered an unbounded scan with
+  // only its own half and no error. These always treat the arguments as a range.
+  // The defaults forward for state machines that do not tell the cases apart.
+  virtual RangeVerdict CheckSpan(std::string_view start, std::string_view end) const {
+    return CheckRange(start, end, false);
+  }
+  virtual std::optional<proto::LockRecord> FindBlockingLockInSpan(std::string_view start,
+                                                                  std::string_view end) const {
+    return FindBlockingLock(start, end);
+  }
+
   // "C" committed, "A" aborted, or nullopt: no decision is recorded here.
   virtual Result<std::optional<std::string>> TxnDecision(std::string_view txid) const = 0;
 

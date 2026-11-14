@@ -234,19 +234,29 @@ Result<std::optional<proto::LockRecord>> KvStateMachine::GetLock(std::string_vie
 
 std::optional<proto::LockRecord> KvStateMachine::FindBlockingLock(std::string_view start,
                                                                   std::string_view end) const {
+  if (start != end) {
+    return FindBlockingLockInSpan(start, end);
+  }
   const std::lock_guard<std::mutex> lock(mutex_);
   if (lock_count_ == 0) {
     return std::nullopt;
   }
   std::optional<proto::LockRecord> found;
-  if (start == end) {
-    auto got = GetLock(start);
-    const proto::LockRecord* held = HeldLock(got);
-    if (held != nullptr && held->kind() != proto::LockRecord::LOCK_ONLY) {
-      found = *held;
-    }
-    return found;
+  auto got = GetLock(start);
+  const proto::LockRecord* held = HeldLock(got);
+  if (held != nullptr && held->kind() != proto::LockRecord::LOCK_ONLY) {
+    found = *held;
   }
+  return found;
+}
+
+std::optional<proto::LockRecord> KvStateMachine::FindBlockingLockInSpan(
+    std::string_view start, std::string_view end) const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (lock_count_ == 0) {
+    return std::nullopt;
+  }
+  std::optional<proto::LockRecord> found;
   const std::string lo = LockKey(start);
   std::string hi;
   if (end.empty()) {
@@ -306,10 +316,15 @@ RangeVerdict KvStateMachine::JudgeKey(std::string_view key, bool write) const {
 
 RangeVerdict KvStateMachine::CheckRange(std::string_view start, std::string_view end,
                                         bool write) const {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  if (start == end) {
-    return JudgeKey(start, write);
+  if (start != end) {
+    return CheckSpan(start, end);
   }
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return JudgeKey(start, write);
+}
+
+RangeVerdict KvStateMachine::CheckSpan(std::string_view start, std::string_view end) const {
+  const std::lock_guard<std::mutex> lock(mutex_);
   if (!range_.configured()) {
     return RangeVerdict::kOk;
   }
