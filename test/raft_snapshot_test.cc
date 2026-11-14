@@ -118,8 +118,8 @@ TEST(RaftSnapshotTest, RandomizedCompactionAndCrashes) {
       const uint64_t leader = cluster.SingleLeader();
       const uint64_t roll = rng() % 20;
       if (leader != 0 && roll < 10) {
-        (void)cluster.Node(leader)->Propose(AsBytes("s" + std::to_string(seed) + "-" +
-                                                    std::to_string(step)));
+        (void)cluster.Node(leader)->Propose(
+            AsBytes("s" + std::to_string(seed) + "-" + std::to_string(step)));
       } else if (roll < 13) {
         cluster.Compact(cluster.Ids()[rng() % cluster.Ids().size()]);
       } else if (roll == 13) {

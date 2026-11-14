@@ -3,9 +3,9 @@
 
 #include <gtest/gtest.h>
 
-#include "lsm/coding.h"
-#include "lsm/crc32c.h"
-#include "lsm/internal_key.h"
+#include "minilsm/coding.h"
+#include "minilsm/crc32c.h"
+#include "minilsm/internal_key.h"
 
 namespace raftkv::lsm {
 namespace {

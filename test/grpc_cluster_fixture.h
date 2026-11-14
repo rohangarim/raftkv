@@ -221,7 +221,7 @@ class GrpcClusterFixture : public ::testing::Test {
     options.raft_config.heartbeat_tick = 1;
     options.raft_config.random_seed = id;
     options.snapshot_threshold = snapshot_threshold_;
-      options.max_inflight_per_peer = max_inflight_per_peer_;
+    options.max_inflight_per_peer = max_inflight_per_peer_;
     options.storage_dir = node.dir / "raft";  // SAME directory: this is the recovery test
     options.peer_addresses = addresses;
     options.tick_interval_ms = 15;

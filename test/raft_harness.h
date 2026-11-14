@@ -114,8 +114,8 @@ class Cluster {
     }
     PersistentState& ps = persisted_[id];
     const uint64_t drop = index - ps.snapshot_index;
-    ps.log.erase(ps.log.begin(),
-                 ps.log.begin() + static_cast<std::ptrdiff_t>(std::min<uint64_t>(drop, ps.log.size())));
+    ps.log.erase(ps.log.begin(), ps.log.begin() + static_cast<std::ptrdiff_t>(
+                                                      std::min<uint64_t>(drop, ps.log.size())));
     ps.snapshot_index = index;
     ps.snapshot_term = *term;
     ps.snapshot_data = data;

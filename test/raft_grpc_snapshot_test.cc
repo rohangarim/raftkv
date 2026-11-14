@@ -39,8 +39,8 @@ TEST_F(RaftGrpcSnapshotTest, LeaderCompactsItsLogAfterEnoughWrites) {
 
   for (uint64_t i = 1; i <= 60; ++i) {
     const std::string cmd = EncodePut("c", i, "k" + std::to_string(i), "v" + std::to_string(i));
-    ASSERT_TRUE(nodes_.at(leader).driver->ProposeAndWait(AsBytes(cmd), std::chrono::seconds(5))
-                    .IsOk());
+    ASSERT_TRUE(
+        nodes_.at(leader).driver->ProposeAndWait(AsBytes(cmd), std::chrono::seconds(5)).IsOk());
   }
   WaitFor([&] { return nodes_.at(leader).driver->SnapshotIndex() > 0; },
           std::chrono::milliseconds(3000));
@@ -63,8 +63,8 @@ TEST_F(RaftGrpcSnapshotTest, FollowerThatMissedACompactedLogCatchesUpBySnapshot)
 
   for (uint64_t i = 1; i <= 100; ++i) {
     const std::string cmd = EncodePut("c", i, "k" + std::to_string(i), "v" + std::to_string(i));
-    ASSERT_TRUE(nodes_.at(leader).driver->ProposeAndWait(AsBytes(cmd), std::chrono::seconds(5))
-                    .IsOk());
+    ASSERT_TRUE(
+        nodes_.at(leader).driver->ProposeAndWait(AsBytes(cmd), std::chrono::seconds(5)).IsOk());
   }
   WaitFor([&] { return nodes_.at(leader).driver->SnapshotIndex() > 0; },
           std::chrono::milliseconds(3000));
@@ -74,8 +74,7 @@ TEST_F(RaftGrpcSnapshotTest, FollowerThatMissedACompactedLogCatchesUpBySnapshot)
   const uint64_t target = nodes_.at(leader).raw_sm->LastAppliedIndex();
   WaitFor([&] { return nodes_.at(victim).raw_sm->LastAppliedIndex() >= target; },
           std::chrono::milliseconds(8000));
-  ASSERT_GE(nodes_.at(victim).raw_sm->LastAppliedIndex(), target)
-      << "the follower never caught up";
+  ASSERT_GE(nodes_.at(victim).raw_sm->LastAppliedIndex(), target) << "the follower never caught up";
   EXPECT_GT(nodes_.at(victim).driver->SnapshotIndex(), 0U)
       << "it should have caught up through a snapshot, not entries";
 
@@ -93,8 +92,8 @@ TEST_F(RaftGrpcSnapshotTest, NodeRestartedAfterSnapshotKeepsItsData) {
   ASSERT_NE(leader, 0U);
   for (uint64_t i = 1; i <= 50; ++i) {
     const std::string cmd = EncodePut("c", i, "k" + std::to_string(i), "v" + std::to_string(i));
-    ASSERT_TRUE(nodes_.at(leader).driver->ProposeAndWait(AsBytes(cmd), std::chrono::seconds(5))
-                    .IsOk());
+    ASSERT_TRUE(
+        nodes_.at(leader).driver->ProposeAndWait(AsBytes(cmd), std::chrono::seconds(5)).IsOk());
   }
   WaitFor([&] { return nodes_.at(leader).driver->SnapshotIndex() > 0; },
           std::chrono::milliseconds(3000));

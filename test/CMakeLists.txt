@@ -23,6 +23,10 @@ raftkv_test(admin_grpc_test
   SOURCES admin_grpc_test.cc
   LIBS raftkv_transport)
 
+raftkv_test(raft_service_test
+  SOURCES raft_service_test.cc
+  LIBS raftkv_transport)
+
 raftkv_test(lsm_coding_test
   SOURCES lsm_coding_test.cc
   LIBS raftkv_lsm)
@@ -147,3 +151,9 @@ set(RAFTKV_SQL_DIR "" CACHE PATH "raftsql checkout whose integration test to bui
 if(RAFTKV_SQL_DIR)
   add_subdirectory(${RAFTKV_SQL_DIR} ${CMAKE_BINARY_DIR}/raftsql)
 endif()
+
+# Every case runs against every engine built in; see the file's header.
+raftkv_test(engine_conformance_test
+  SOURCES engine_conformance_test.cc
+  LIBS raftkv_engine
+  TIMEOUT 300)

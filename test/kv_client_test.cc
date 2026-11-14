@@ -383,6 +383,77 @@ TEST_F(KvClientTest, BatchWritesManyKeysAtomicallyOverRealGrpc) {
   EXPECT_EQ(**got, "v57");
 }
 
+// The end-to-end form of the engine's read-atomicity guarantee, through real
+// gRPC, Raft and the state machine. One client applies atomic two-key batches
+// (pair-a = pair-b = i); other clients scan the pair. A scan is linearizable, so
+// it must see some batch's two writes both or neither -- never `pair-a=5,
+// pair-b=4`. This only holds if the storage engine itself never exposes half of
+// a batch to a concurrent reader, which lsmtree does not do on its own
+// (DECISIONS.md D-0058); the same test on the built-in engine is the control.
+TEST_F(KvClientTest, ConcurrentScansNeverSeeHalfOfAnAtomicBatch) {
+  election_tick_ = 60;  // see the note on election_tick_ in the fixture
+  StartCluster({1, 2, 3});
+  ASSERT_NE(WaitForLeader(), 0U);
+
+  {
+    KvClient seed(Options(AllAddresses(), "pair-seed"));
+    auto out = seed.Batch({}, {{"pair-a", "0"}, {"pair-b", "0"}});
+    ASSERT_TRUE(out.IsOk() && out->applied);
+  }
+
+  std::atomic<bool> stop{false};
+  std::atomic<int> torn{0};
+  std::atomic<long> scans{0};
+  std::atomic<int> errors{0};
+  std::mutex note_mutex;
+  std::string first_torn;
+
+  std::thread writer([&] {
+    KvClient client(Options(AllAddresses(), "pair-writer"));
+    for (int i = 1; !stop.load(); ++i) {
+      auto out = client.Batch({}, {{"pair-a", std::to_string(i)}, {"pair-b", std::to_string(i)}});
+      if (!out.IsOk() || !out->applied) {
+        ++errors;
+      }
+    }
+  });
+  std::vector<std::thread> readers;
+  readers.reserve(3);
+  for (int t = 0; t < 3; ++t) {
+    readers.emplace_back([&, t] {
+      KvClient client(Options(AllAddresses(), "pair-reader" + std::to_string(t)));
+      while (!stop.load()) {
+        auto page = client.Scan("pair-", "pair.");
+        if (!page.IsOk()) {
+          ++errors;
+          continue;
+        }
+        ++scans;
+        if (page->pairs.size() != 2 || page->pairs[0].second != page->pairs[1].second) {
+          if (torn.fetch_add(1) == 0) {
+            const std::lock_guard<std::mutex> lock(note_mutex);
+            first_torn = page->pairs.empty() ? "nothing"
+                                             : page->pairs[0].first + "=" + page->pairs[0].second;
+            if (page->pairs.size() > 1) {
+              first_torn += " and " + page->pairs[1].first + "=" + page->pairs[1].second;
+            }
+          }
+        }
+      }
+    });
+  }
+  std::this_thread::sleep_for(std::chrono::seconds(4));
+  stop.store(true);
+  writer.join();
+  for (auto& r : readers) {
+    r.join();
+  }
+  EXPECT_EQ(errors.load(), 0);
+  EXPECT_GT(scans.load(), 500L) << "too few scans to mean anything";
+  EXPECT_EQ(torn.load(), 0) << "a scan saw half of an atomic batch: " << first_torn << " (after "
+                            << scans.load() << " scans)";
+}
+
 TEST_F(KvClientTest, BatchPreconditionFailureChangesNothing) {
   StartCluster({1, 2, 3});
   ASSERT_NE(WaitForLeader(), 0U);

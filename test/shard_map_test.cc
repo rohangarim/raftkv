@@ -52,7 +52,7 @@ TEST(ShardMapTest, OverlappingReturnsOnlyTheRangesTheScanTouches) {
     return out;
   };
   EXPECT_EQ(ids(map.Overlapping("a", "c")), (std::vector<uint32_t>{1}));
-  EXPECT_EQ(ids(map.Overlapping("a", "g")), (std::vector<uint32_t>{1}));   // end is exclusive
+  EXPECT_EQ(ids(map.Overlapping("a", "g")), (std::vector<uint32_t>{1}));  // end is exclusive
   EXPECT_EQ(ids(map.Overlapping("a", "h")), (std::vector<uint32_t>{1, 2}));
   EXPECT_EQ(ids(map.Overlapping("h", "")), (std::vector<uint32_t>{2, 3}));
   EXPECT_EQ(ids(map.Overlapping("", "")), (std::vector<uint32_t>{1, 2, 3}));
@@ -83,7 +83,7 @@ TEST(ShardMapTest, SplitRejectsBoundariesAndTheEmptyKey) {
 
 TEST(ShardMapTest, CreateValidatesItsInput) {
   EXPECT_FALSE(ShardMap::Create({}).IsOk());
-  EXPECT_FALSE(ShardMap::Create({Range(1, "a")}).IsOk());                   // must start at ""
+  EXPECT_FALSE(ShardMap::Create({Range(1, "a")}).IsOk());  // must start at ""
   EXPECT_FALSE(ShardMap::Create({Range(1, ""), Range(2, "m"), Range(3, "c")}).IsOk());
   EXPECT_FALSE(ShardMap::Create({Range(1, ""), Range(2, "m"), Range(3, "m")}).IsOk());
   EXPECT_FALSE(ShardMap::Create({Range(1, ""), Range(1, "m")}).IsOk());
@@ -92,7 +92,8 @@ TEST(ShardMapTest, CreateValidatesItsInput) {
 }
 
 TEST(ShardMapTest, SerializationRoundTripsIncludingBinaryKeys) {
-  auto map = ShardMap::Create({Range(1, ""), Range(2, std::string("a\0b", 3)), Range(7, "\xff\xfe")}, 42);
+  auto map =
+      ShardMap::Create({Range(1, ""), Range(2, std::string("a\0b", 3)), Range(7, "\xff\xfe")}, 42);
   ASSERT_TRUE(map.IsOk());
   const std::string bytes = map->Serialize();
   auto back = ShardMap::Deserialize(bytes);

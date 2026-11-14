@@ -61,7 +61,8 @@ std::string EncodeCas(const std::string& client, uint64_t seq, const std::string
 
 struct BatchSpec {
   std::vector<std::pair<std::string, std::optional<std::string>>> checks;  // key, expected
-  std::vector<std::pair<std::string, std::optional<std::string>>> writes;  // key, value (nullopt = delete)
+  std::vector<std::pair<std::string, std::optional<std::string>>>
+      writes;  // key, value (nullopt = delete)
 };
 
 std::string EncodeBatch(const std::string& client, uint64_t seq, const BatchSpec& spec) {
@@ -89,8 +90,8 @@ std::string EncodeBatch(const std::string& client, uint64_t seq, const BatchSpec
 }
 
 std::string EncodeRange(const std::string& client, uint64_t seq, proto::RangeCmd::Kind kind,
-                        const std::string& lo, const std::string& hi, bool unbounded, uint64_t epoch,
-                        bool empty = false) {
+                        const std::string& lo, const std::string& hi, bool unbounded,
+                        uint64_t epoch, bool empty = false) {
   proto::Command c;
   c.set_client_id(client);
   c.set_seq(seq);
@@ -169,7 +170,10 @@ std::string EncodeTxnEnd(const std::string& client, uint64_t seq, proto::TxnCmd:
   return c.SerializeAsString();
 }
 
-class StateMachineTest : public ::testing::Test {
+// Parameterized over the storage engine: the state machine's behaviour -- dedup,
+// transactions, range ownership, snapshots -- is specified once and must hold on
+// every engine (see test/engine_conformance_test.cc for the engine contract).
+class StateMachineTest : public ::testing::TestWithParam<engine::Kind> {
  protected:
   void SetUp() override {
     dir_ = std::filesystem::temp_directory_path() /
@@ -186,10 +190,11 @@ class StateMachineTest : public ::testing::Test {
 
   void Open(const std::filesystem::path* dir = nullptr) {
     sm_.reset();
-    lsm::Options o;
+    engine::Options o;
     o.dir = dir != nullptr ? *dir : dir_;
+    o.kind = GetParam();
     o.memtable_bytes = size_t{64} * 1024 * 1024;
-    auto opened = KvStateMachine::Open(std::move(o));
+    auto opened = KvStateMachine::Open(o);
     ASSERT_TRUE(opened.IsOk()) << opened.GetStatus().ToString();
     sm_ = opened.TakeValue();
   }
@@ -208,7 +213,7 @@ class StateMachineTest : public ::testing::Test {
   std::unique_ptr<KvStateMachine> sm_;
 };
 
-TEST_F(StateMachineTest, AppliesAPut) {
+TEST_P(StateMachineTest, AppliesAPut) {
   const auto r = Apply(1, EncodePut("c1", 1, "k", "v"));
   ASSERT_TRUE(r.status.IsOk()) << r.status.ToString();
   EXPECT_FALSE(r.deduplicated);
@@ -216,13 +221,13 @@ TEST_F(StateMachineTest, AppliesAPut) {
   EXPECT_EQ(sm_->LastAppliedIndex(), 1U);
 }
 
-TEST_F(StateMachineTest, AppliesADelete) {
+TEST_P(StateMachineTest, AppliesADelete) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "k", "v")).status.IsOk());
   ASSERT_TRUE(Apply(2, EncodeDelete("c1", 2, "k")).status.IsOk());
   EXPECT_FALSE(Get("k").has_value());
 }
 
-TEST_F(StateMachineTest, AdvancesTheAppliedIndex) {
+TEST_P(StateMachineTest, AdvancesTheAppliedIndex) {
   for (uint64_t i = 1; i <= 5; ++i) {
     ASSERT_TRUE(Apply(i, EncodePut("c1", i, "k", std::to_string(i))).status.IsOk());
     EXPECT_EQ(sm_->LastAppliedIndex(), i);
@@ -236,7 +241,7 @@ TEST_F(StateMachineTest, AdvancesTheAppliedIndex) {
 // This is the test the whole session table exists for. A client that retries
 // after a leader failover resends the same (client_id, seq); applying it twice
 // is a linearizability violation the Phase 10 checker will find.
-TEST_F(StateMachineTest, ReplayingASequenceAppliesOnlyOnce) {
+TEST_P(StateMachineTest, ReplayingASequenceAppliesOnlyOnce) {
   const std::string cmd = EncodeCas("c1", 1, "counter", std::nullopt, "created");
 
   const auto first = Apply(1, cmd);
@@ -255,7 +260,7 @@ TEST_F(StateMachineTest, ReplayingASequenceAppliesOnlyOnce) {
   EXPECT_EQ(Get("counter"), "created");
 }
 
-TEST_F(StateMachineTest, DedupReturnsTheOriginalCachedValue) {
+TEST_P(StateMachineTest, DedupReturnsTheOriginalCachedValue) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "k", "original")).status.IsOk());
   // A different client changes the key in between.
   ASSERT_TRUE(Apply(2, EncodePut("c2", 1, "k", "changed")).status.IsOk());
@@ -265,14 +270,14 @@ TEST_F(StateMachineTest, DedupReturnsTheOriginalCachedValue) {
   EXPECT_EQ(Get("k"), "changed") << "the retry must not have re-applied its write";
 }
 
-TEST_F(StateMachineTest, DifferentClientsDoNotShareASequenceSpace) {
+TEST_P(StateMachineTest, DifferentClientsDoNotShareASequenceSpace) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "a", "1")).status.IsOk());
   const auto other = Apply(2, EncodePut("c2", 1, "b", "2"));
   EXPECT_FALSE(other.deduplicated) << "c2 seq 1 is unrelated to c1 seq 1";
   EXPECT_EQ(Get("b"), "2");
 }
 
-TEST_F(StateMachineTest, AnOlderSequenceIsRejectedRatherThanReapplied) {
+TEST_P(StateMachineTest, AnOlderSequenceIsRejectedRatherThanReapplied) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "k", "v1")).status.IsOk());
   ASSERT_TRUE(Apply(2, EncodePut("c1", 2, "k", "v2")).status.IsOk());
 
@@ -283,7 +288,7 @@ TEST_F(StateMachineTest, AnOlderSequenceIsRejectedRatherThanReapplied) {
   EXPECT_EQ(Get("k"), "v2");
 }
 
-TEST_F(StateMachineTest, DedupSurvivesRestart) {
+TEST_P(StateMachineTest, DedupSurvivesRestart) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 7, "k", "v")).status.IsOk());
   ASSERT_TRUE(sm_->Sync().IsOk());
 
@@ -298,7 +303,7 @@ TEST_F(StateMachineTest, DedupSurvivesRestart) {
 // applied -- silent data loss, with no error anywhere. A true retry is
 // byte-identical, so a reused sequence number carrying different bytes is a
 // client bug that must fail loudly.
-TEST_F(StateMachineTest, ReusingASequenceNumberForADifferentCommandIsRejected) {
+TEST_P(StateMachineTest, ReusingASequenceNumberForADifferentCommandIsRejected) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "first", "a")).status.IsOk());
 
   const auto reused = Apply(2, EncodePut("c1", 1, "second", "b"));
@@ -310,7 +315,7 @@ TEST_F(StateMachineTest, ReusingASequenceNumberForADifferentCommandIsRejected) {
   EXPECT_EQ(Get("first"), "a");
 }
 
-TEST_F(StateMachineTest, AnIdenticalRetryIsStillAnsweredFromTheSession) {
+TEST_P(StateMachineTest, AnIdenticalRetryIsStillAnsweredFromTheSession) {
   const std::string cmd = EncodePut("c1", 1, "k", "v");
   ASSERT_TRUE(Apply(1, cmd).status.IsOk());
   const auto retry = Apply(2, cmd);
@@ -320,7 +325,7 @@ TEST_F(StateMachineTest, AnIdenticalRetryIsStillAnsweredFromTheSession) {
 
 // The session digest has to survive a restart, or the protection disappears
 // exactly when a restarting client needs it.
-TEST_F(StateMachineTest, TheReuseCheckSurvivesARestart) {
+TEST_P(StateMachineTest, TheReuseCheckSurvivesARestart) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "first", "a")).status.IsOk());
   ASSERT_TRUE(sm_->Sync().IsOk());
   Open();
@@ -331,7 +336,7 @@ TEST_F(StateMachineTest, TheReuseCheckSurvivesARestart) {
 // A command answered from the session cache is still a log entry that was
 // consumed. If the state machine's applied index did not move, it would trail
 // Raft's, and a snapshot taken at the Raft index would be refused.
-TEST_F(StateMachineTest, ADeduplicatedCommandStillAdvancesTheAppliedIndex) {
+TEST_P(StateMachineTest, ADeduplicatedCommandStillAdvancesTheAppliedIndex) {
   const std::string cmd = EncodePut("c1", 1, "k", "v");
   ASSERT_TRUE(Apply(1, cmd).status.IsOk());
   ASSERT_TRUE(Apply(2, cmd).deduplicated);
@@ -344,7 +349,7 @@ TEST_F(StateMachineTest, ADeduplicatedCommandStillAdvancesTheAppliedIndex) {
   EXPECT_EQ(sm_->LastAppliedIndex(), 5U) << "a rejected command left the applied index behind";
 }
 
-TEST_F(StateMachineTest, CommandsWithoutAClientIdAreNotDeduplicated) {
+TEST_P(StateMachineTest, CommandsWithoutAClientIdAreNotDeduplicated) {
   // Internal commands (a leader's no-op entry, for instance) carry no client.
   const auto first = Apply(1, EncodePut("", 0, "k", "v1"));
   ASSERT_TRUE(first.status.IsOk());
@@ -355,7 +360,7 @@ TEST_F(StateMachineTest, CommandsWithoutAClientIdAreNotDeduplicated) {
 
 // Recovery replays the tail of the Raft log. An index at or below the applied
 // index must be ignored, or every restart re-applies its last commands.
-TEST_F(StateMachineTest, ReplayingAnOldIndexIsIgnored) {
+TEST_P(StateMachineTest, ReplayingAnOldIndexIsIgnored) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "k", "v1")).status.IsOk());
   ASSERT_TRUE(Apply(2, EncodePut("c2", 1, "k", "v2")).status.IsOk());
 
@@ -369,7 +374,7 @@ TEST_F(StateMachineTest, ReplayingAnOldIndexIsIgnored) {
 // CAS
 // ---------------------------------------------------------------------------
 
-TEST_F(StateMachineTest, CasCreatesOnlyWhenAbsent) {
+TEST_P(StateMachineTest, CasCreatesOnlyWhenAbsent) {
   const auto created = Apply(1, EncodeCas("c1", 1, "k", std::nullopt, "first"));
   ASSERT_TRUE(created.status.IsOk());
   EXPECT_FALSE(created.cas_mismatch);
@@ -383,7 +388,7 @@ TEST_F(StateMachineTest, CasCreatesOnlyWhenAbsent) {
   EXPECT_EQ(Get("k"), "first");
 }
 
-TEST_F(StateMachineTest, CasSwapsOnAMatch) {
+TEST_P(StateMachineTest, CasSwapsOnAMatch) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "k", "old")).status.IsOk());
   const auto swapped = Apply(2, EncodeCas("c1", 2, "k", "old", "new"));
   ASSERT_TRUE(swapped.status.IsOk());
@@ -391,7 +396,7 @@ TEST_F(StateMachineTest, CasSwapsOnAMatch) {
   EXPECT_EQ(Get("k"), "new");
 }
 
-TEST_F(StateMachineTest, CasRejectsAMismatch) {
+TEST_P(StateMachineTest, CasRejectsAMismatch) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "k", "actual")).status.IsOk());
   const auto rejected = Apply(2, EncodeCas("c1", 2, "k", "guessed", "new"));
   ASSERT_TRUE(rejected.status.IsOk());
@@ -399,7 +404,7 @@ TEST_F(StateMachineTest, CasRejectsAMismatch) {
   EXPECT_EQ(Get("k"), "actual");
 }
 
-TEST_F(StateMachineTest, CasOnAnAbsentKeyWithAnExpectedValueMismatches) {
+TEST_P(StateMachineTest, CasOnAnAbsentKeyWithAnExpectedValueMismatches) {
   const auto r = Apply(1, EncodeCas("c1", 1, "absent", "something", "new"));
   ASSERT_TRUE(r.status.IsOk());
   EXPECT_TRUE(r.cas_mismatch);
@@ -413,7 +418,7 @@ TEST_F(StateMachineTest, CasOnAnAbsentKeyWithAnExpectedValueMismatches) {
 
 // Two independent replicas fed the same command sequence must end up in the
 // same state. This is the property the whole design rests on.
-TEST_F(StateMachineTest, IdenticalCommandSequencesProduceIdenticalState) {
+TEST_P(StateMachineTest, IdenticalCommandSequencesProduceIdenticalState) {
   const auto other_dir = dir_.parent_path() / (dir_.filename().string() + "_replica");
   std::filesystem::create_directories(other_dir);
 
@@ -450,7 +455,7 @@ TEST_F(StateMachineTest, IdenticalCommandSequencesProduceIdenticalState) {
 
 // Namespace tags are prepended by the adapter, never taken from client input,
 // so no request can address the metadata or session namespaces.
-TEST_F(StateMachineTest, ClientKeysCannotReachInternalNamespaces) {
+TEST_P(StateMachineTest, ClientKeysCannotReachInternalNamespaces) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "applied_index", "forged")).status.IsOk());
   EXPECT_EQ(sm_->LastAppliedIndex(), 1U) << "a client write clobbered the applied index";
 
@@ -461,7 +466,7 @@ TEST_F(StateMachineTest, ClientKeysCannotReachInternalNamespaces) {
   EXPECT_EQ((*session)->last_seq(), 2U) << "a client write clobbered a session entry";
 }
 
-TEST_F(StateMachineTest, MalformedCommandsStillAdvanceTheIndex) {
+TEST_P(StateMachineTest, MalformedCommandsStillAdvanceTheIndex) {
   // Refusing to advance would wedge the log on a poison entry forever, and
   // every replica rejects the same bytes identically, so this stays
   // deterministic.
@@ -477,7 +482,7 @@ TEST_F(StateMachineTest, MalformedCommandsStillAdvanceTheIndex) {
 // Snapshots
 // ---------------------------------------------------------------------------
 
-TEST_F(StateMachineTest, SnapshotRoundTripsState) {
+TEST_P(StateMachineTest, SnapshotRoundTripsState) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "a", "1")).status.IsOk());
   ASSERT_TRUE(Apply(2, EncodePut("c1", 2, "b", "2")).status.IsOk());
   ASSERT_TRUE(Apply(3, EncodeDelete("c1", 3, "a")).status.IsOk());
@@ -503,7 +508,7 @@ TEST_F(StateMachineTest, SnapshotRoundTripsState) {
 
 // Forgetting the session table in a snapshot breaks exactly-once after a
 // restore: the client's retry looks new and is applied twice.
-TEST_F(StateMachineTest, SnapshotCarriesTheSessionTable) {
+TEST_P(StateMachineTest, SnapshotCarriesTheSessionTable) {
   ASSERT_TRUE(Apply(1, EncodeCas("c1", 5, "k", std::nullopt, "created")).status.IsOk());
 
   auto snapshot = sm_->TakeSnapshot(1, 1);
@@ -522,7 +527,7 @@ TEST_F(StateMachineTest, SnapshotCarriesTheSessionTable) {
   std::filesystem::remove_all(restore_dir, ec);
 }
 
-TEST_F(StateMachineTest, RestoreReplacesRatherThanMergesState) {
+TEST_P(StateMachineTest, RestoreReplacesRatherThanMergesState) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "kept", "1")).status.IsOk());
   auto snapshot = sm_->TakeSnapshot(1, 1);
   ASSERT_TRUE(snapshot.IsOk());
@@ -542,14 +547,14 @@ TEST_F(StateMachineTest, RestoreReplacesRatherThanMergesState) {
   std::filesystem::remove_all(restore_dir, ec);
 }
 
-TEST_F(StateMachineTest, SnapshotAtTheWrongIndexIsRejected) {
+TEST_P(StateMachineTest, SnapshotAtTheWrongIndexIsRejected) {
   ASSERT_TRUE(Apply(1, EncodePut("c1", 1, "k", "v")).status.IsOk());
   auto too_far = sm_->TakeSnapshot(99, 1);
   EXPECT_FALSE(too_far.IsOk()) << "a snapshot must describe a state actually reached";
   EXPECT_EQ(too_far.GetStatus().ErrCode(), lsm::Code::kInvalidArgument);
 }
 
-TEST_F(StateMachineTest, SnapshotStreamsInChunks) {
+TEST_P(StateMachineTest, SnapshotStreamsInChunks) {
   for (uint64_t i = 1; i <= 200; ++i) {
     ASSERT_TRUE(Apply(i, EncodePut("c1", i, "key" + std::to_string(i), std::string(500, 'v')))
                     .status.IsOk());
@@ -570,7 +575,7 @@ TEST_F(StateMachineTest, SnapshotStreamsInChunks) {
   EXPECT_EQ(assembled, *whole);
 }
 
-TEST_F(StateMachineTest, RecoversAppliedIndexAcrossRestart) {
+TEST_P(StateMachineTest, RecoversAppliedIndexAcrossRestart) {
   for (uint64_t i = 1; i <= 3; ++i) {
     ASSERT_TRUE(Apply(i, EncodePut("c1", i, "k", std::to_string(i))).status.IsOk());
   }
@@ -586,9 +591,10 @@ TEST_F(StateMachineTest, RecoversAppliedIndexAcrossRestart) {
 // Batches
 // ---------------------------------------------------------------------------
 
-TEST_F(StateMachineTest, BatchAppliesEveryWriteTogether) {
+TEST_P(StateMachineTest, BatchAppliesEveryWriteTogether) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "gone", "x")).status.IsOk());
-  const auto r = Apply(2, EncodeBatch("c", 2, {{}, {{"a", "1"}, {"b", "2"}, {"gone", std::nullopt}}}));
+  const auto r =
+      Apply(2, EncodeBatch("c", 2, {{}, {{"a", "1"}, {"b", "2"}, {"gone", std::nullopt}}}));
   ASSERT_TRUE(r.status.IsOk());
   EXPECT_FALSE(r.cas_mismatch);
   EXPECT_EQ(Get("a"), "1");
@@ -596,10 +602,11 @@ TEST_F(StateMachineTest, BatchAppliesEveryWriteTogether) {
   EXPECT_FALSE(Get("gone").has_value());
 }
 
-TEST_F(StateMachineTest, BatchWithAFailedCheckWritesNothing) {
+TEST_P(StateMachineTest, BatchWithAFailedCheckWritesNothing) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "taken", "mine")).status.IsOk());
-  const auto r = Apply(2, EncodeBatch("c", 2, {{{"free", std::nullopt}, {"taken", std::nullopt}},
-                                                {{"free", "1"}, {"other", "2"}}}));
+  const auto r = Apply(2, EncodeBatch("c", 2,
+                                      {{{"free", std::nullopt}, {"taken", std::nullopt}},
+                                       {{"free", "1"}, {"other", "2"}}}));
   ASSERT_TRUE(r.status.IsOk());
   EXPECT_TRUE(r.cas_mismatch);
   ASSERT_TRUE(r.failed_check.has_value());
@@ -609,7 +616,7 @@ TEST_F(StateMachineTest, BatchWithAFailedCheckWritesNothing) {
   EXPECT_EQ(Get("taken"), "mine");
 }
 
-TEST_F(StateMachineTest, BatchChecksCompareValues) {
+TEST_P(StateMachineTest, BatchChecksCompareValues) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "k", "v1")).status.IsOk());
   EXPECT_TRUE(Apply(2, EncodeBatch("c", 2, {{{"k", "v1"}}, {{"k", "v2"}}})).status.IsOk());
   EXPECT_EQ(Get("k"), "v2");
@@ -620,27 +627,29 @@ TEST_F(StateMachineTest, BatchChecksCompareValues) {
 
 // Checks look at the state before the batch, so a batch cannot satisfy its own
 // precondition and the outcome never depends on the order of its operations.
-TEST_F(StateMachineTest, BatchChecksIgnoreTheBatchsOwnWrites) {
-  const auto r = Apply(1, EncodeBatch("c", 1, {{{"k", "from-the-batch"}}, {{"k", "from-the-batch"}}}));
+TEST_P(StateMachineTest, BatchChecksIgnoreTheBatchsOwnWrites) {
+  const auto r =
+      Apply(1, EncodeBatch("c", 1, {{{"k", "from-the-batch"}}, {{"k", "from-the-batch"}}}));
   EXPECT_TRUE(r.cas_mismatch);
   EXPECT_FALSE(Get("k").has_value());
 }
 
-TEST_F(StateMachineTest, ALaterOpInABatchOverridesAnEarlierOneOnTheSameKey) {
+TEST_P(StateMachineTest, ALaterOpInABatchOverridesAnEarlierOneOnTheSameKey) {
   ASSERT_TRUE(Apply(1, EncodeBatch("c", 1, {{}, {{"k", "first"}, {"k", "second"}}})).status.IsOk());
   EXPECT_EQ(Get("k"), "second");
-  ASSERT_TRUE(Apply(2, EncodeBatch("c", 2, {{}, {{"k", "again"}, {"k", std::nullopt}}})).status.IsOk());
+  ASSERT_TRUE(
+      Apply(2, EncodeBatch("c", 2, {{}, {{"k", "again"}, {"k", std::nullopt}}})).status.IsOk());
   EXPECT_FALSE(Get("k").has_value());
 }
 
-TEST_F(StateMachineTest, EmptyBatchIsRejectedButACheckOnlyBatchIsValid) {
+TEST_P(StateMachineTest, EmptyBatchIsRejectedButACheckOnlyBatchIsValid) {
   EXPECT_FALSE(Apply(1, EncodeBatch("c", 1, {})).status.IsOk());
   const auto ok = Apply(2, EncodeBatch("c", 2, {{{"absent", std::nullopt}}, {}}));
   EXPECT_TRUE(ok.status.IsOk());
   EXPECT_FALSE(ok.cas_mismatch);
 }
 
-TEST_F(StateMachineTest, ReplayedBatchAppliesOnceAndRemembersAFailedCheck) {
+TEST_P(StateMachineTest, ReplayedBatchAppliesOnceAndRemembersAFailedCheck) {
   ASSERT_TRUE(Apply(1, EncodePut("c0", 1, "taken", "x")).status.IsOk());
   const std::string cmd = EncodeBatch("c", 1, {{{"taken", std::nullopt}}, {{"w", "1"}}});
   const auto first = Apply(2, cmd);
@@ -656,7 +665,7 @@ TEST_F(StateMachineTest, ReplayedBatchAppliesOnceAndRemembersAFailedCheck) {
   EXPECT_FALSE(Get("w").has_value());
 }
 
-TEST_F(StateMachineTest, BatchSurvivesAReopen) {
+TEST_P(StateMachineTest, BatchSurvivesAReopen) {
   ASSERT_TRUE(Apply(1, EncodeBatch("c", 1, {{}, {{"x", "1"}, {"y", "2"}}})).status.IsOk());
   Open();
   EXPECT_EQ(Get("x"), "1");
@@ -667,14 +676,15 @@ TEST_F(StateMachineTest, BatchSurvivesAReopen) {
 // Shard ownership
 // ---------------------------------------------------------------------------
 
-TEST_F(StateMachineTest, AnUnconfiguredMachineOwnsEverything) {
+TEST_P(StateMachineTest, AnUnconfiguredMachineOwnsEverything) {
   EXPECT_EQ(sm_->CheckRange("a", "a", true), RangeVerdict::kOk);
   EXPECT_EQ(sm_->CheckRange("", "", false), RangeVerdict::kOk);
   EXPECT_TRUE(Apply(1, EncodePut("c", 1, "anything", "v")).status.IsOk());
 }
 
-TEST_F(StateMachineTest, WritesOutsideTheOwnedRangeAreRefusedAndChangeNothing) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
+TEST_P(StateMachineTest, WritesOutsideTheOwnedRangeAreRefusedAndChangeNothing) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1))
+                  .status.IsOk());
 
   EXPECT_TRUE(Apply(2, EncodePut("c", 1, "h", "in")).status.IsOk());
   const auto low = Apply(3, EncodePut("c", 2, "a", "out"));
@@ -692,13 +702,14 @@ TEST_F(StateMachineTest, WritesOutsideTheOwnedRangeAreRefusedAndChangeNothing) {
   EXPECT_EQ(Get("h"), "in");
 }
 
-TEST_F(StateMachineTest, CheckRangeJudgesReadsAndScans) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
+TEST_P(StateMachineTest, CheckRangeJudgesReadsAndScans) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1))
+                  .status.IsOk());
   EXPECT_EQ(sm_->CheckRange("h", "h", false), RangeVerdict::kOk);
   EXPECT_EQ(sm_->CheckRange("a", "a", false), RangeVerdict::kWrongShard);
   EXPECT_EQ(sm_->CheckRange("g", "p", false), RangeVerdict::kOk);
-  EXPECT_EQ(sm_->CheckRange("h", "z", false), RangeVerdict::kWrongShard);   // spills past the end
-  EXPECT_EQ(sm_->CheckRange("h", "", false), RangeVerdict::kWrongShard);    // unbounded spills too
+  EXPECT_EQ(sm_->CheckRange("h", "z", false), RangeVerdict::kWrongShard);  // spills past the end
+  EXPECT_EQ(sm_->CheckRange("h", "", false), RangeVerdict::kWrongShard);   // unbounded spills too
   EXPECT_EQ(sm_->CheckRange("a", "h", false), RangeVerdict::kWrongShard);
 }
 
@@ -707,85 +718,106 @@ TEST_F(StateMachineTest, CheckRangeJudgesReadsAndScans) {
 // of its range answered an unbounded scan with only the part it still held,
 // because the scan was judged as a single-key lookup. The span forms always
 // treat the arguments as a range.
-TEST_F(StateMachineTest, AnUnboundedScanIsNotMistakenForAPointLookup) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "m", false, 1)).status.IsOk());
-  EXPECT_EQ(sm_->CheckSpan("", ""), RangeVerdict::kWrongShard) << "the range ends at m, a scan to the end spills past it";
+TEST_P(StateMachineTest, AnUnboundedScanIsNotMistakenForAPointLookup) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "m", false, 1))
+                  .status.IsOk());
+  EXPECT_EQ(sm_->CheckSpan("", ""), RangeVerdict::kWrongShard)
+      << "the range ends at m, a scan to the end spills past it";
   EXPECT_EQ(sm_->CheckSpan("", "m"), RangeVerdict::kOk);
   EXPECT_EQ(sm_->CheckSpan("a", "z"), RangeVerdict::kWrongShard);
-  EXPECT_EQ(sm_->CheckRange("", "", false), RangeVerdict::kOk) << "as a point, the key \"\" is owned";
+  EXPECT_EQ(sm_->CheckRange("", "", false), RangeVerdict::kOk)
+      << "as a point, the key \"\" is owned";
 }
 
-TEST_F(StateMachineTest, AnUnboundedScanSeesALockThatAPointCheckOfTheEmptyKeyDoesNot) {
+TEST_P(StateMachineTest, AnUnboundedScanSeesALockThatAPointCheckOfTheEmptyKeyDoesNot) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "a", "old")).status.IsOk());
-  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "new"}})).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "new"}}))
+                  .status.IsOk());
   EXPECT_FALSE(sm_->FindBlockingLock("", "").has_value()) << "this is a lookup of the key \"\"";
-  EXPECT_TRUE(sm_->FindBlockingLockInSpan("", "").has_value()) << "a scan of everything must meet the lock on a";
+  EXPECT_TRUE(sm_->FindBlockingLockInSpan("", "").has_value())
+      << "a scan of everything must meet the lock on a";
 }
 
-TEST_F(StateMachineTest, AnUnboundedRangeOwnsEverythingFromItsStart) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "m", "", true, 1)).status.IsOk());
+TEST_P(StateMachineTest, AnUnboundedRangeOwnsEverythingFromItsStart) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "m", "", true, 1))
+                  .status.IsOk());
   EXPECT_EQ(sm_->CheckRange("zzzz", "zzzz", false), RangeVerdict::kOk);
   EXPECT_EQ(sm_->CheckRange("m", "", false), RangeVerdict::kOk);
   EXPECT_EQ(sm_->CheckRange("l", "l", false), RangeVerdict::kWrongShard);
 }
 
-TEST_F(StateMachineTest, AFenceRefusesWritesButStillAllowsReads) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", true, 1)).status.IsOk());
+TEST_P(StateMachineTest, AFenceRefusesWritesButStillAllowsReads) {
+  ASSERT_TRUE(
+      Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", true, 1)).status.IsOk());
   ASSERT_TRUE(Apply(2, EncodePut("c", 1, "k", "before")).status.IsOk());
-  ASSERT_TRUE(Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "j", "", true, 2)).status.IsOk());
+  ASSERT_TRUE(
+      Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "j", "", true, 2)).status.IsOk());
 
   EXPECT_TRUE(Apply(4, EncodePut("c", 2, "k", "during")).moving);
   EXPECT_TRUE(Apply(5, EncodePut("c", 3, "a", "below-the-fence")).status.IsOk());  // not fenced
   EXPECT_EQ(Get("k"), "before");
-  EXPECT_EQ(sm_->CheckRange("k", "k", false), RangeVerdict::kOk);   // reads continue
+  EXPECT_EQ(sm_->CheckRange("k", "k", false), RangeVerdict::kOk);  // reads continue
   EXPECT_EQ(sm_->CheckRange("k", "k", true), RangeVerdict::kMoving);
 }
 
-TEST_F(StateMachineTest, ShrinkingTheOwnedRangeEndsTheFenceAndRefusesTheMovedKeys) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", true, 1)).status.IsOk());
+TEST_P(StateMachineTest, ShrinkingTheOwnedRangeEndsTheFenceAndRefusesTheMovedKeys) {
+  ASSERT_TRUE(
+      Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", true, 1)).status.IsOk());
   ASSERT_TRUE(Apply(2, EncodePut("c", 1, "k", "v")).status.IsOk());
-  ASSERT_TRUE(Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "j", "", true, 2)).status.IsOk());
-  ASSERT_TRUE(Apply(4, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "", "j", false, 2)).status.IsOk());
+  ASSERT_TRUE(
+      Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "j", "", true, 2)).status.IsOk());
+  ASSERT_TRUE(Apply(4, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "", "j", false, 2))
+                  .status.IsOk());
 
   EXPECT_TRUE(Apply(5, EncodePut("c", 2, "k", "moved")).wrong_shard);
   EXPECT_EQ(sm_->CheckRange("k", "k", false), RangeVerdict::kWrongShard);
   EXPECT_EQ(sm_->CheckRange("a", "a", true), RangeVerdict::kOk);  // fence is gone
 }
 
-TEST_F(StateMachineTest, ImportBypassesOwnershipSoATargetCanBeFilledBeforeItServes) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", false, 1, true)).status.IsOk());
+TEST_P(StateMachineTest, ImportBypassesOwnershipSoATargetCanBeFilledBeforeItServes) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", false, 1, true))
+                  .status.IsOk());
   EXPECT_TRUE(Apply(2, EncodePut("c", 1, "k", "x")).wrong_shard);  // owns nothing yet
-  ASSERT_TRUE(Apply(3, EncodeImport("admin", 2, {{"k", "copied"}, {"l", "copied2"}})).status.IsOk());
-  ASSERT_TRUE(Apply(4, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "j", "", true, 2)).status.IsOk());
+  ASSERT_TRUE(
+      Apply(3, EncodeImport("admin", 2, {{"k", "copied"}, {"l", "copied2"}})).status.IsOk());
+  ASSERT_TRUE(Apply(4, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "j", "", true, 2))
+                  .status.IsOk());
   EXPECT_EQ(Get("k"), "copied");
   EXPECT_TRUE(Apply(5, EncodePut("c", 2, "k", "live")).status.IsOk());
   EXPECT_EQ(Get("k"), "live");
 }
 
-TEST_F(StateMachineTest, AStaleEpochCannotUndoANewerHandover) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "m", false, 5)).status.IsOk());
+TEST_P(StateMachineTest, AStaleEpochCannotUndoANewerHandover) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "m", false, 5))
+                  .status.IsOk());
   const auto stale = Apply(2, EncodeRange("admin", 2, proto::RangeCmd::SET_OWNED, "", "", true, 3));
   EXPECT_FALSE(stale.status.IsOk());
   EXPECT_EQ(sm_->CheckRange("z", "z", false), RangeVerdict::kWrongShard);
   // The same epoch is fine, which is what makes a coordinator's retry safe.
-  EXPECT_TRUE(Apply(3, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "", "m", false, 5)).status.IsOk());
+  EXPECT_TRUE(Apply(3, EncodeRange("admin", 3, proto::RangeCmd::SET_OWNED, "", "m", false, 5))
+                  .status.IsOk());
 }
 
-TEST_F(StateMachineTest, FencingAnUnconfiguredMachineMeansItOwnedEverything) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::FENCE, "m", "", true, 1)).status.IsOk());
+TEST_P(StateMachineTest, FencingAnUnconfiguredMachineMeansItOwnedEverything) {
+  ASSERT_TRUE(
+      Apply(1, EncodeRange("admin", 1, proto::RangeCmd::FENCE, "m", "", true, 1)).status.IsOk());
   EXPECT_EQ(sm_->CheckRange("a", "a", true), RangeVerdict::kOk);
   EXPECT_EQ(sm_->CheckRange("z", "z", true), RangeVerdict::kMoving);
   EXPECT_EQ(sm_->CheckRange("z", "z", false), RangeVerdict::kOk);
 }
 
-TEST_F(StateMachineTest, CannotFenceWhatIsNotOwned) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", false, 1, true)).status.IsOk());
-  EXPECT_FALSE(Apply(2, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "a", "b", false, 2)).status.IsOk());
+TEST_P(StateMachineTest, CannotFenceWhatIsNotOwned) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "", "", false, 1, true))
+                  .status.IsOk());
+  EXPECT_FALSE(
+      Apply(2, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "a", "b", false, 2)).status.IsOk());
 }
 
-TEST_F(StateMachineTest, OwnershipSurvivesAReopenAndASnapshotRestore) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 4)).status.IsOk());
-  ASSERT_TRUE(Apply(2, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "m", "p", false, 4)).status.IsOk());
+TEST_P(StateMachineTest, OwnershipSurvivesAReopenAndASnapshotRestore) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 4))
+                  .status.IsOk());
+  ASSERT_TRUE(
+      Apply(2, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "m", "p", false, 4)).status.IsOk());
   Open();
   EXPECT_EQ(sm_->CheckRange("a", "a", false), RangeVerdict::kWrongShard);
   EXPECT_EQ(sm_->CheckRange("n", "n", true), RangeVerdict::kMoving);
@@ -801,8 +833,9 @@ TEST_F(StateMachineTest, OwnershipSurvivesAReopenAndASnapshotRestore) {
   EXPECT_EQ(sm_->CheckRange("h", "h", true), RangeVerdict::kOk);
 }
 
-TEST_F(StateMachineTest, ARefusedWriteIsCachedSoARetryGivesTheSameAnswer) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
+TEST_P(StateMachineTest, ARefusedWriteIsCachedSoARetryGivesTheSameAnswer) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1))
+                  .status.IsOk());
   const std::string cmd = EncodePut("c", 1, "a", "x");
   EXPECT_TRUE(Apply(2, cmd).wrong_shard);
   const auto retry = Apply(3, cmd);
@@ -810,12 +843,15 @@ TEST_F(StateMachineTest, ARefusedWriteIsCachedSoARetryGivesTheSameAnswer) {
   EXPECT_TRUE(retry.wrong_shard);
 }
 
-TEST_F(StateMachineTest, PurgeDeletesGivenAwayKeysAndNeverLiveOnes) {
+TEST_P(StateMachineTest, PurgeDeletesGivenAwayKeysAndNeverLiveOnes) {
   for (char c = 'a'; c <= 'z'; ++c) {
-    ASSERT_TRUE(Apply(static_cast<uint64_t>(c), EncodePut("c", static_cast<uint64_t>(c), std::string(1, c), "v")).status.IsOk());
+    ASSERT_TRUE(Apply(static_cast<uint64_t>(c),
+                      EncodePut("c", static_cast<uint64_t>(c), std::string(1, c), "v"))
+                    .status.IsOk());
   }
   uint64_t seq = 1;
-  auto purge = [&](uint64_t index, const std::string& lo, const std::string& hi, bool unbounded, uint32_t limit) {
+  auto purge = [&](uint64_t index, const std::string& lo, const std::string& hi, bool unbounded,
+                   uint32_t limit) {
     proto::Command c;
     c.set_client_id("admin");
     c.set_seq(seq++);
@@ -829,7 +865,8 @@ TEST_F(StateMachineTest, PurgeDeletesGivenAwayKeysAndNeverLiveOnes) {
     return Apply(index, c.SerializeAsString());
   };
   // Own [a, m): purging inside it is refused and deletes nothing.
-  ASSERT_TRUE(Apply(1000, EncodeRange("o", 1, proto::RangeCmd::SET_OWNED, "a", "m", false, 1)).status.IsOk());
+  ASSERT_TRUE(Apply(1000, EncodeRange("o", 1, proto::RangeCmd::SET_OWNED, "a", "m", false, 1))
+                  .status.IsOk());
   EXPECT_FALSE(purge(1001, "k", "q", false, 0).status.IsOk());
   EXPECT_EQ(Get("k"), "v");
 
@@ -853,10 +890,11 @@ TEST_F(StateMachineTest, PurgeDeletesGivenAwayKeysAndNeverLiveOnes) {
 // Transactions
 // ---------------------------------------------------------------------------
 
-TEST_F(StateMachineTest, PrewriteLocksWithoutChangingValuesAndCommitInstallsThem) {
+TEST_P(StateMachineTest, PrewriteLocksWithoutChangingValuesAndCommitInstallsThem) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "a", "old")).status.IsOk());
-  const auto pre = Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "new-a"},
-                                                               {"b", proto::LockRecord::PUT, "new-b"}}));
+  const auto pre = Apply(2, EncodePrewrite("t", 1, "T1", "a",
+                                           {{"a", proto::LockRecord::PUT, "new-a"},
+                                            {"b", proto::LockRecord::PUT, "new-b"}}));
   ASSERT_TRUE(pre.status.IsOk());
   EXPECT_EQ(pre.txn, TxnOutcome::kNone);
   EXPECT_EQ(Get("a"), "old") << "a prewrite must not change visible values";
@@ -874,33 +912,39 @@ TEST_F(StateMachineTest, PrewriteLocksWithoutChangingValuesAndCommitInstallsThem
   EXPECT_EQ(*decision, std::optional<std::string>("C"));
 }
 
-TEST_F(StateMachineTest, ALockOnlyKeyHoldsOffWritersButIsInvisibleToReaders) {
+TEST_P(StateMachineTest, ALockOnlyKeyHoldsOffWritersButIsInvisibleToReaders) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "r", "v")).status.IsOk());
-  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "w", {{"r", proto::LockRecord::LOCK_ONLY, ""},
-                                                          {"w", proto::LockRecord::PUT, "x"}})).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "w",
+                                      {{"r", proto::LockRecord::LOCK_ONLY, ""},
+                                       {"w", proto::LockRecord::PUT, "x"}}))
+                  .status.IsOk());
   EXPECT_FALSE(sm_->FindBlockingLock("r", "r").has_value());
   EXPECT_TRUE(sm_->FindBlockingLock("w", "w").has_value());
   EXPECT_EQ(Apply(3, EncodePut("c", 2, "r", "sneaky")).txn, TxnOutcome::kLocked);
   EXPECT_EQ(Get("r"), "v");
   // Committing releases the read-only lock without writing anything to it.
-  ASSERT_TRUE(Apply(4, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"r", "w"}, true)).status.IsOk());
+  ASSERT_TRUE(
+      Apply(4, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"r", "w"}, true)).status.IsOk());
   EXPECT_EQ(Get("r"), "v");
   EXPECT_TRUE(Apply(5, EncodePut("c", 3, "r", "now-ok")).status.IsOk());
 }
 
-TEST_F(StateMachineTest, ConflictingPrewriteIsRefusedAndLocksNothing) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "1"}})).status.IsOk());
-  const auto r = Apply(2, EncodePrewrite("u", 1, "T2", "free", {{"free", proto::LockRecord::PUT, "x"},
-                                                                {"k", proto::LockRecord::PUT, "2"}}));
+TEST_P(StateMachineTest, ConflictingPrewriteIsRefusedAndLocksNothing) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "1"}}))
+                  .status.IsOk());
+  const auto r = Apply(2, EncodePrewrite("u", 1, "T2", "free",
+                                         {{"free", proto::LockRecord::PUT, "x"},
+                                          {"k", proto::LockRecord::PUT, "2"}}));
   EXPECT_EQ(r.txn, TxnOutcome::kLocked);
   ASSERT_TRUE(r.lock.has_value());
   EXPECT_EQ(r.lock->txid(), "T1");
   EXPECT_EQ(r.lock->primary_key(), "k");
-  EXPECT_FALSE(sm_->FindBlockingLock("free", "free").has_value()) << "the refused prewrite locked a key";
+  EXPECT_FALSE(sm_->FindBlockingLock("free", "free").has_value())
+      << "the refused prewrite locked a key";
   EXPECT_TRUE(Apply(3, EncodePut("c", 1, "free", "ok")).status.IsOk());
 }
 
-TEST_F(StateMachineTest, PrewriteValidatesWhatTheTransactionRead) {
+TEST_P(StateMachineTest, PrewriteValidatesWhatTheTransactionRead) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "k", "v1")).status.IsOk());
   TxnKeySpec good{"k", proto::LockRecord::PUT, "v2", true, false, "v1"};
   TxnKeySpec stale{"k", proto::LockRecord::PUT, "v2", true, false, "v0"};
@@ -912,24 +956,30 @@ TEST_F(StateMachineTest, PrewriteValidatesWhatTheTransactionRead) {
   ASSERT_TRUE(bad.failed_check.has_value());
   EXPECT_EQ(*bad.failed_check, 1U);
   EXPECT_FALSE(sm_->FindBlockingLock("nope", "nope").has_value()) << "validation is all or nothing";
-  EXPECT_EQ(Apply(3, EncodePrewrite("t", 2, "T2", "k", {wrong_absent})).txn, TxnOutcome::kValidationFailed);
+  EXPECT_EQ(Apply(3, EncodePrewrite("t", 2, "T2", "k", {wrong_absent})).txn,
+            TxnOutcome::kValidationFailed);
   EXPECT_EQ(Apply(4, EncodePrewrite("t", 3, "T3", "k", {good, absent})).txn, TxnOutcome::kNone);
 }
 
-TEST_F(StateMachineTest, PlainWritesToALockedKeyAreRefusedInEveryForm) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "tx"}})).status.IsOk());
+TEST_P(StateMachineTest, PlainWritesToALockedKeyAreRefusedInEveryForm) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "tx"}}))
+                  .status.IsOk());
   EXPECT_EQ(Apply(2, EncodePut("c", 1, "k", "x")).txn, TxnOutcome::kLocked);
   EXPECT_EQ(Apply(3, EncodeDelete("c", 2, "k")).txn, TxnOutcome::kLocked);
   EXPECT_EQ(Apply(4, EncodeCas("c", 3, "k", std::nullopt, "x")).txn, TxnOutcome::kLocked);
-  EXPECT_EQ(Apply(5, EncodeBatch("c", 4, {{}, {{"other", "1"}, {"k", "2"}}})).txn, TxnOutcome::kLocked);
-  EXPECT_EQ(Apply(6, EncodeBatch("c", 5, {{{"k", std::nullopt}}, {{"other", "1"}}})).txn, TxnOutcome::kLocked);
+  EXPECT_EQ(Apply(5, EncodeBatch("c", 4, {{}, {{"other", "1"}, {"k", "2"}}})).txn,
+            TxnOutcome::kLocked);
+  EXPECT_EQ(Apply(6, EncodeBatch("c", 5, {{{"k", std::nullopt}}, {{"other", "1"}}})).txn,
+            TxnOutcome::kLocked);
   EXPECT_FALSE(Get("other").has_value()) << "a refused batch wrote part of itself";
   EXPECT_TRUE(Apply(7, EncodePut("c", 6, "unrelated", "fine")).status.IsOk());
 }
 
-TEST_F(StateMachineTest, RollbackReleasesLocksAndBlocksALatePrewrite) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "x"},
-                                                          {"b", proto::LockRecord::PUT, "y"}})).status.IsOk());
+TEST_P(StateMachineTest, RollbackReleasesLocksAndBlocksALatePrewrite) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "a",
+                                      {{"a", proto::LockRecord::PUT, "x"},
+                                       {"b", proto::LockRecord::PUT, "y"}}))
+                  .status.IsOk());
   const auto rb = Apply(2, EncodeTxnEnd("o", 1, proto::TxnCmd::ROLLBACK, "T1", {"a", "b"}));
   ASSERT_TRUE(rb.status.IsOk());
   EXPECT_FALSE(sm_->FindBlockingLock("a", "a").has_value());
@@ -939,17 +989,21 @@ TEST_F(StateMachineTest, RollbackReleasesLocksAndBlocksALatePrewrite) {
   EXPECT_EQ(*decision, std::optional<std::string>("A"));
 
   // The coordinator's delayed prewrite shows up after the rollback.
-  EXPECT_EQ(Apply(4, EncodePrewrite("t", 2, "T1", "a", {{"a", proto::LockRecord::PUT, "late"}})).txn,
-            TxnOutcome::kAborted);
+  EXPECT_EQ(
+      Apply(4, EncodePrewrite("t", 2, "T1", "a", {{"a", proto::LockRecord::PUT, "late"}})).txn,
+      TxnOutcome::kAborted);
   EXPECT_FALSE(sm_->FindBlockingLock("a", "a").has_value()) << "a late prewrite resurrected a lock";
   // And committing the primary of a rolled-back transaction fails.
-  EXPECT_EQ(Apply(5, EncodeTxnEnd("t", 3, proto::TxnCmd::COMMIT, "T1", {"a"}, true)).txn, TxnOutcome::kAborted);
+  EXPECT_EQ(Apply(5, EncodeTxnEnd("t", 3, proto::TxnCmd::COMMIT, "T1", {"a"}, true)).txn,
+            TxnOutcome::kAborted);
   EXPECT_EQ(Get("a"), "free");
 }
 
-TEST_F(StateMachineTest, ACommittedTransactionCannotBeRolledBack) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "v"}})).status.IsOk());
-  ASSERT_TRUE(Apply(2, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+TEST_P(StateMachineTest, ACommittedTransactionCannotBeRolledBack) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "v"}}))
+                  .status.IsOk());
+  ASSERT_TRUE(
+      Apply(2, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
   EXPECT_EQ(Apply(3, EncodeTxnEnd("o", 1, proto::TxnCmd::ROLLBACK, "T1", {"k"})).txn,
             TxnOutcome::kAlreadyCommitted);
   EXPECT_EQ(Get("k"), "v");
@@ -957,9 +1011,12 @@ TEST_F(StateMachineTest, ACommittedTransactionCannotBeRolledBack) {
   EXPECT_EQ(*decision, std::optional<std::string>("C"));
 }
 
-TEST_F(StateMachineTest, CommitIsIdempotentAndNeverReappliesAnOldValue) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "from-txn"}})).status.IsOk());
-  ASSERT_TRUE(Apply(2, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+TEST_P(StateMachineTest, CommitIsIdempotentAndNeverReappliesAnOldValue) {
+  ASSERT_TRUE(
+      Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "from-txn"}}))
+          .status.IsOk());
+  ASSERT_TRUE(
+      Apply(2, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
   ASSERT_TRUE(Apply(3, EncodePut("c", 1, "k", "later-write")).status.IsOk());
   // A resolver and the coordinator both roll the key forward; the second must
   // not clobber what happened since.
@@ -969,23 +1026,28 @@ TEST_F(StateMachineTest, CommitIsIdempotentAndNeverReappliesAnOldValue) {
   EXPECT_EQ(Get("k"), "later-write");
 }
 
-TEST_F(StateMachineTest, CommittingAKeyWhoseLockWasRolledBackReportsAbort) {
-  EXPECT_EQ(Apply(1, EncodeTxnEnd("t", 1, proto::TxnCmd::COMMIT, "T9", {"k"}, false)).txn, TxnOutcome::kAborted);
+TEST_P(StateMachineTest, CommittingAKeyWhoseLockWasRolledBackReportsAbort) {
+  EXPECT_EQ(Apply(1, EncodeTxnEnd("t", 1, proto::TxnCmd::COMMIT, "T9", {"k"}, false)).txn,
+            TxnOutcome::kAborted);
   EXPECT_FALSE(Get("k").has_value());
 }
 
-TEST_F(StateMachineTest, DeleteIntentRemovesTheKeyOnCommit) {
+TEST_P(StateMachineTest, DeleteIntentRemovesTheKeyOnCommit) {
   ASSERT_TRUE(Apply(1, EncodePut("c", 1, "k", "v")).status.IsOk());
-  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::DELETE, ""}})).status.IsOk());
+  ASSERT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::DELETE, ""}}))
+                  .status.IsOk());
   EXPECT_EQ(Get("k"), "v");
-  ASSERT_TRUE(Apply(3, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+  ASSERT_TRUE(
+      Apply(3, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
   EXPECT_FALSE(Get("k").has_value());
 }
 
-TEST_F(StateMachineTest, LocksAndDecisionsSurviveAReopenAndASnapshotRestore) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "v"}})).status.IsOk());
+TEST_P(StateMachineTest, LocksAndDecisionsSurviveAReopenAndASnapshotRestore) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "v"}}))
+                  .status.IsOk());
   Open();
-  EXPECT_EQ(Apply(2, EncodePut("c", 1, "k", "x")).txn, TxnOutcome::kLocked) << "the lock count was lost on reopen";
+  EXPECT_EQ(Apply(2, EncodePut("c", 1, "k", "x")).txn, TxnOutcome::kLocked)
+      << "the lock count was lost on reopen";
 
   auto snapshot = sm_->TakeSnapshot(sm_->LastAppliedIndex(), 1);
   ASSERT_TRUE(snapshot.IsOk());
@@ -993,27 +1055,35 @@ TEST_F(StateMachineTest, LocksAndDecisionsSurviveAReopenAndASnapshotRestore) {
   std::filesystem::create_directories(other);
   Open(&other);
   ASSERT_TRUE(sm_->RestoreSnapshot(**snapshot).IsOk());
-  EXPECT_EQ(Apply(sm_->LastAppliedIndex() + 1, EncodePut("c", 2, "k", "x")).txn, TxnOutcome::kLocked);
-  ASSERT_TRUE(Apply(sm_->LastAppliedIndex() + 1, EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true)).status.IsOk());
+  EXPECT_EQ(Apply(sm_->LastAppliedIndex() + 1, EncodePut("c", 2, "k", "x")).txn,
+            TxnOutcome::kLocked);
+  ASSERT_TRUE(Apply(sm_->LastAppliedIndex() + 1,
+                    EncodeTxnEnd("t", 2, proto::TxnCmd::COMMIT, "T1", {"k"}, true))
+                  .status.IsOk());
   EXPECT_EQ(Get("k"), "v");
 }
 
-TEST_F(StateMachineTest, ARangeWithATransactionInFlightCannotBeFenced) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "m", {{"m", proto::LockRecord::PUT, "v"}})).status.IsOk());
+TEST_P(StateMachineTest, ARangeWithATransactionInFlightCannotBeFenced) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "m", {{"m", proto::LockRecord::PUT, "v"}}))
+                  .status.IsOk());
   const auto fence = Apply(2, EncodeRange("admin", 1, proto::RangeCmd::FENCE, "k", "", true, 1));
   EXPECT_FALSE(fence.status.IsOk());
   // Below the lock is fine.
-  EXPECT_TRUE(Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "a", "k", false, 1)).status.IsOk());
+  EXPECT_TRUE(
+      Apply(3, EncodeRange("admin", 2, proto::RangeCmd::FENCE, "a", "k", false, 1)).status.IsOk());
 }
 
-TEST_F(StateMachineTest, TransactionsRespectShardOwnership) {
-  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1)).status.IsOk());
-  EXPECT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "x"}})).wrong_shard);
+TEST_P(StateMachineTest, TransactionsRespectShardOwnership) {
+  ASSERT_TRUE(Apply(1, EncodeRange("admin", 1, proto::RangeCmd::SET_OWNED, "g", "p", false, 1))
+                  .status.IsOk());
+  EXPECT_TRUE(Apply(2, EncodePrewrite("t", 1, "T1", "a", {{"a", proto::LockRecord::PUT, "x"}}))
+                  .wrong_shard);
   EXPECT_FALSE(sm_->FindBlockingLock("a", "a").has_value());
 }
 
-TEST_F(StateMachineTest, ARefusedPrewriteIsCachedForRetries) {
-  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "1"}})).status.IsOk());
+TEST_P(StateMachineTest, ARefusedPrewriteIsCachedForRetries) {
+  ASSERT_TRUE(Apply(1, EncodePrewrite("t", 1, "T1", "k", {{"k", proto::LockRecord::PUT, "1"}}))
+                  .status.IsOk());
   const std::string cmd = EncodePrewrite("u", 1, "T2", "k", {{"k", proto::LockRecord::PUT, "2"}});
   const auto first = Apply(2, cmd);
   ASSERT_EQ(first.txn, TxnOutcome::kLocked);
@@ -1023,5 +1093,10 @@ TEST_F(StateMachineTest, ARefusedPrewriteIsCachedForRetries) {
   ASSERT_TRUE(retry.lock.has_value());
   EXPECT_EQ(retry.lock->txid(), "T1");
 }
+
+INSTANTIATE_TEST_SUITE_P(Engines, StateMachineTest, ::testing::ValuesIn(engine::AvailableKinds()),
+                         [](const ::testing::TestParamInfo<engine::Kind>& info) {
+                           return std::string(engine::KindName(info.param));
+                         });
 
 }  // namespace raftkv::statemachine

@@ -47,8 +47,29 @@ for preset in ${PRESETS}; do
   cmake --preset "${preset}"
   cmake --build --preset "${preset}"
   if ! ctest --preset "${preset}"; then
-    echo "!! preset ${preset} FAILED"
+    echo "!! preset ${preset} FAILED (builtin engine)"
     fail=1
+  fi
+
+  # The whole suite again on the other storage engine. RAFTKV_ENGINE makes every
+  # test that brings up a state machine -- clusters, clients, shards, transactions,
+  # snapshots -- use lsmtree without editing any of them, so a pass here is a
+  # system-level statement, not just an engine-level one. Only if this build
+  # actually contains lsmtree: DefaultKind() falls back (loudly) when it does not,
+  # and rerunning the built-in engine under another name would prove nothing.
+  if [ "${preset}" = "default" ]; then
+    bindir="build"
+  else
+    bindir="build/${preset}"
+  fi
+  if "${bindir}/test/engine_conformance_test" --gtest_list_tests 2>/dev/null | grep -q '/lsmtree'; then
+    echo "== preset: ${preset} (RAFTKV_ENGINE=lsmtree)"
+    if ! RAFTKV_ENGINE=lsmtree ctest --preset "${preset}"; then
+      echo "!! preset ${preset} FAILED (lsmtree engine)"
+      fail=1
+    fi
+  else
+    echo "== preset: ${preset}: lsmtree not built in; skipping the second-engine pass"
   fi
 done
 

@@ -2,8 +2,8 @@
 
 #include <gtest/gtest.h>
 
-#include "lsm/memtable.h"
-#include "lsm/write_batch.h"
+#include "minilsm/memtable.h"
+#include "minilsm/write_batch.h"
 
 namespace raftkv::lsm {
 namespace {

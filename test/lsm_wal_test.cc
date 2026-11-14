@@ -10,7 +10,7 @@
 
 #include <gtest/gtest.h>
 
-#include "lsm/wal.h"
+#include "minilsm/wal.h"
 
 namespace raftkv::lsm {
 namespace {

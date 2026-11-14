@@ -12,8 +12,9 @@
 
 #include <gtest/gtest.h>
 
-#include "client/sharded_client.h"
 #include "grpc_cluster_fixture.h"
+
+#include "client/sharded_client.h"
 
 namespace raftkv::client {
 namespace {
@@ -132,7 +133,7 @@ TEST_F(TxnTest, ASingleShardTransactionUsesNoTwoPhaseCommit) {
 // racing, never change the total.
 TEST_F(TxnTest, ConcurrentTransfersAcrossShardsPreserveTheTotal) {
   StartTwoShards();
-  constexpr int kAccounts = 4;       // two on each shard
+  constexpr int kAccounts = 4;  // two on each shard
   constexpr int kInitial = 1000;
   std::vector<std::string> names = {"acct-a", "acct-b", "acct-y", "acct-z"};
   {
@@ -153,7 +154,8 @@ TEST_F(TxnTest, ConcurrentTransfersAcrossShardsPreserveTheTotal) {
       std::mt19937 rng(static_cast<unsigned>(w) + 1);
       for (int i = 0; i < 12; ++i) {
         const std::string& from = names[rng() % kAccounts];
-        const std::string& to = names[(rng() % (kAccounts - 1) + 1 + (&from - &names[0])) % kAccounts];
+        const std::string& to =
+            names[(rng() % (kAccounts - 1) + 1 + (&from - &names[0])) % kAccounts];
         const int amount = static_cast<int>(rng() % 50) + 1;
         for (int attempt = 0; attempt < 50; ++attempt) {
           Transaction txn = client->Begin();
@@ -317,7 +319,8 @@ TEST_F(TxnTest, AScanThatMeetsALeftoverLockSettlesItFirst) {
   ASSERT_TRUE(all.IsOk()) << all.GetStatus().ToString();
   ASSERT_EQ(all->pairs.size(), 2U);
   EXPECT_EQ(all->pairs[0].second, "2");
-  EXPECT_EQ(all->pairs[1].second, "2") << "the scan returned the pre-commit value of a committed key";
+  EXPECT_EQ(all->pairs[1].second, "2")
+      << "the scan returned the pre-commit value of a committed key";
 }
 
 TEST_F(TxnTest, APlainWriteWaitsOutAnAbandonedTransactionInsteadOfFailing) {

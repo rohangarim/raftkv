@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "lsm/db.h"
+#include "minilsm/db.h"
 
 namespace raftkv::lsm {
 namespace {
@@ -533,7 +533,6 @@ TEST_F(DbTest, ScanOfAnEmptyRangeVisitsNothing) {
   EXPECT_TRUE(RunScan(db_.get(), "n", "z").empty());
   EXPECT_TRUE(RunScan(db_.get(), "m", "m").empty());
 }
-
 
 }  // namespace
 }  // namespace raftkv::lsm

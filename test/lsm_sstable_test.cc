@@ -4,8 +4,8 @@
 
 #include <gtest/gtest.h>
 
-#include "lsm/internal_key.h"
-#include "lsm/sstable.h"
+#include "minilsm/internal_key.h"
+#include "minilsm/sstable.h"
 
 namespace raftkv::lsm {
 namespace {

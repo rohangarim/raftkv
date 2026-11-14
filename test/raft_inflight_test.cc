@@ -2,16 +2,15 @@
 // pile up a blocked thread per tick, and must not stop the rest of the cluster
 // from committing.
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <chrono>
 #include <string>
 #include <thread>
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "grpc_cluster_fixture.h"
 

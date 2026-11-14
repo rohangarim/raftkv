@@ -35,8 +35,8 @@ class ShardedClientTest : public GrpcClusterFixture {
     ASSERT_NE(WaitForLeaderAmong({1, 2, 3}), 0U);
     ASSERT_NE(WaitForLeaderAmong({4, 5, 6}), 0U);
 
-    auto map = shard::ShardMap::Create({{1, "", AddressesOf({1, 2, 3})},
-                                        {2, "m", AddressesOf({4, 5, 6})}});
+    auto map = shard::ShardMap::Create(
+        {{1, "", AddressesOf({1, 2, 3})}, {2, "m", AddressesOf({4, 5, 6})}});
     ASSERT_TRUE(map.IsOk());
     ClientOptions base;
     base.client_id = "test";
@@ -133,8 +133,8 @@ TEST_F(ShardedClientTest, DeleteAndCasRouteToTheOwningShard) {
 TEST_F(ShardedClientTest, AnOlderMapNeverReplacesANewerOne) {
   StartTwoShards();
   EXPECT_EQ(client_->MapEpoch(), 1U);
-  auto newer = shard::ShardMap::Create({{1, "", AddressesOf({1, 2, 3})},
-                                        {2, "x", AddressesOf({4, 5, 6})}}, 5);
+  auto newer = shard::ShardMap::Create(
+      {{1, "", AddressesOf({1, 2, 3})}, {2, "x", AddressesOf({4, 5, 6})}}, 5);
   ASSERT_TRUE(newer.IsOk());
   client_->UpdateMap(newer.TakeValue());
   EXPECT_EQ(client_->MapEpoch(), 5U);

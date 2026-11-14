@@ -11,9 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include "grpc_cluster_fixture.h"
+
 #include "client/shard_splitter.h"
 #include "client/sharded_client.h"
-#include "grpc_cluster_fixture.h"
 
 namespace raftkv::client {
 namespace {
@@ -260,7 +261,8 @@ TEST_P(ShardSplitResumeTest, ACrashedCoordinatorIsResumedByANewOne) {
 }
 
 INSTANTIATE_TEST_SUITE_P(EveryStep, ShardSplitResumeTest,
-                         ::testing::Values("fenced", "copied", "published", "released", "activated"));
+                         ::testing::Values("fenced", "copied", "published", "released",
+                                           "activated"));
 
 TEST_F(ShardSplitTest, RefusesASplitKeyThatDoesNotBelongToTheNamedShard) {
   Start();
