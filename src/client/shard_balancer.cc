@@ -64,7 +64,7 @@ Result<bool> ShardBalancer::RunOnce(const Provision& provision) {
   if (!planned) {
     return false;
   }
-  const SplitPlan chosen = *planned;
+  const SplitPlan& chosen = *planned;
 
   auto addresses = provision();
   if (!addresses.IsOk()) {
