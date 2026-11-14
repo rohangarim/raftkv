@@ -15,7 +15,7 @@ leader being killed with a real `SIGKILL`, and a node that falls far behind
 catches up from a snapshot instead of the log it no longer has.
 
 Performance numbers are below, each backed by raw output in `results/`; no file,
-no number. 316 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
+no number. 320 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
 timing-sensitive test failed once under load in an ASan run and passed on
 rerun; the raw output is in `results/`). The Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
 dropped, delayed and duplicated messages) checking all five safety invariants
@@ -146,19 +146,28 @@ and checks the history with a Wing-Gong style search
 may not have happened". Fifteen seeds of about 1,100 operations each all passed
 ([`results/54`](results/54_raftkv_linearizability_campaign.txt)).
 
+`test/process_chaos_test` runs the same workload against three real
+`raftkv_node` processes. Nodes are killed with `SIGKILL`, and every node-to-node
+link goes through a TCP relay the test can cut, which isolates a node (the
+leader about half the time) without root or Docker. Twelve seeds of about 1,000
+operations pass ([`results/55`](results/55_raftkv_process_chaos_campaign.txt)).
+Its first runs found a real bug: after a follower's log diverged from a new
+leader's, the driver never removed the stale entries from disk, and the node
+then failed every tick for good. That's fixed (D-0056) and has a regression
+test.
+
 The checker is tested both ways: 13 unit tests of histories it must accept and
 reject, and a mutation check. With reads that skip the leadership and
-apply-point wait, the campaign fails on 4 of 4 seeds and prints the offending
-history. With client-session deduplication turned off it still passes, because
+apply-point wait, the in-process campaign fails on 4 of 4 seeds and the process
+campaign on 3 of 3, each printing the offending history. With client-session deduplication turned off it still passes, because
 a retry after a lost reply is too rare in this setup for 1,100 operations to hit.
 
 ## What it doesn't do yet
 
-- **No network partitions, and the kills are graceful.** A linearizability
-  campaign (below) kills and restarts nodes inside the test process, which stops
-  the server cleanly rather than cutting power mid-write. The real-process
-  `SIGKILL` test is still one kill of one leader. Partitions need Docker
-  `tc`/`iptables`.
+- **No power-loss test, no real network.** Kills are `SIGKILL` and partitions
+  are cut TCP relays on loopback, so a node never loses its OS page cache and
+  there's no latency, reordering or asymmetric loss. Disk errors and clock
+  faults aren't tested either.
 - **Concurrent writers scale only about 2x.** Group commit shares the leader's
   sync, but followers still sync once per append and replication isn't pipelined
   beyond a per-peer cap.

@@ -1449,3 +1449,47 @@ proof.
 **Found along the way:** the test fixture dereferenced a null driver when a node
 restarted while another was down. Fixed in the fixture; no production code
 changed.
+
+---
+
+## D-0056: Truncate the durable log when a follower's suffix is replaced
+
+**Phase:** 10 (found by the process chaos test).
+
+**What was wrong:** when a follower accepted a different leader's entries over a
+divergent suffix, `RaftNode` rewound its persisted index and re-emitted the
+overwritten indices. The driver passed them to `RaftLogStore::Append`, which
+only accepts index `last + 1`, so every persist failed with `append at index N
+leaves a hole after M`. The in-memory log was already changed, the disk was
+not, and the node repeated the failure on every tick: alive, never serving, never
+recovering. `RaftLogStore::TruncateSuffix` existed and was tested, but the driver
+never called it. The in-process Raft harness models storage without this
+interface, and the gRPC cluster tests rarely produce a conflicting suffix, so
+nothing exercised the gap until SIGKILLs and partitions did. One run left 830 of
+1,005 client operations with unknown outcomes.
+
+**Fix:** `PersistReady` calls `TruncateSuffix(first)` when the first entry to
+persist is at or below the log's last index, then appends. A deterministic driver
+test (term-1 entries 1..3, then a term-2 leader overwriting from 2, then a
+restart) failed with the same error before the change and passes after.
+
+**Second bug in the same path:** `TruncateSuffix` deleted every segment and
+rewrote the survivors, so a crash in the middle lost the entire log, entries the
+node had acknowledged included. It now deletes later segments newest first and
+cuts the holding segment at the entry's byte offset, so at every step the file
+set is a valid prefix of the old log; what a crash can cost is entries the
+leader is about to overwrite, which can never have been committed. A storage test
+truncates across segments at four cut points and reopens.
+
+**What I could not explain:** two earlier runs of the process campaign (before
+the fix) reported `no valid order` histories. I did not capture their full
+output, they did not reproduce afterwards, and twelve seeds after the fix pass. A
+node that failed to persist while its in-memory log had advanced is a plausible
+cause, but I did not show that. Treat it as an open question, not a closed one.
+
+**Evidence:** `results/55`: 12 of 12 seeds pass after the fix; with reads made
+non-linearizable the process campaign fails 3 of 3.
+
+**Limits:** `SIGKILL` and cut TCP relays on one machine. The page cache survives
+a process kill, so this does not test power loss; there is no latency, reorder or
+asymmetric-loss modelling.

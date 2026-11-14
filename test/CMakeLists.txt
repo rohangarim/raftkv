@@ -110,6 +110,13 @@ raftkv_test(linearizability_cluster_test
   LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
   TIMEOUT 240)
 
+raftkv_test(process_chaos_test
+  SOURCES process_chaos_test.cc
+  LIBS raftkv_client
+  TIMEOUT 300)
+add_dependencies(process_chaos_test raftkv_node)
+target_compile_definitions(process_chaos_test PRIVATE RAFTKV_NODE_BIN="$<TARGET_FILE:raftkv_node>")
+
 raftkv_test(shard_map_test
   SOURCES shard_map_test.cc
   LIBS raftkv_shard)
@@ -121,6 +128,11 @@ raftkv_test(sharded_client_test
 
 raftkv_test(shard_split_test
   SOURCES shard_split_test.cc
+  LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
+  TIMEOUT 300)
+
+raftkv_test(shard_balancer_test
+  SOURCES shard_balancer_test.cc
   LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
   TIMEOUT 300)
 

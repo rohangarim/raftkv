@@ -1,0 +1,29 @@
+# raftkv process campaign: 3 real raftkv_node processes; SIGKILL, userspace-relay partitions (leader isolated about half the time), double faults
+# recorded: 2026-11-14T08:33:11Z  git: 5be85d1 + the truncate fix and test changes
+# per seed: ./build/test/process_chaos_test with RAFTKV_LIN_SEED=<seed>; 5 clients, 5 keys, 1000 ops, then a final read of every key
+# 'unknown' = operations whose outcome the client could not learn
+
+## AFTER the fix (driver truncates the durable log suffix before appending)
+seed 1 exit=0 process campaign: 1005 ops, 5 unknown, 1 SIGKILLs, 2 partitions, 1 double faults, 417 reads, 32 successful swaps
+seed 2 exit=0 process campaign: 1005 ops, 9 unknown, 2 SIGKILLs, 4 partitions, 2 double faults, 411 reads, 21 successful swaps
+seed 3 exit=0 process campaign: 1005 ops, 8 unknown, 3 SIGKILLs, 4 partitions, 2 double faults, 412 reads, 40 successful swaps
+seed 4 exit=0 process campaign: 1005 ops, 12 unknown, 2 SIGKILLs, 4 partitions, 2 double faults, 431 reads, 27 successful swaps
+seed 5 exit=0 process campaign: 1005 ops, 23 unknown, 3 SIGKILLs, 6 partitions, 3 double faults, 402 reads, 31 successful swaps
+seed 6 exit=0 process campaign: 1005 ops, 15 unknown, 3 SIGKILLs, 6 partitions, 3 double faults, 396 reads, 28 successful swaps
+seed 7 exit=0 process campaign: 1005 ops, 23 unknown, 3 SIGKILLs, 6 partitions, 3 double faults, 400 reads, 33 successful swaps
+seed 8 exit=0 process campaign: 1005 ops, 25 unknown, 4 SIGKILLs, 6 partitions, 3 double faults, 374 reads, 34 successful swaps
+seed 9 exit=0 process campaign: 1005 ops, 41 unknown, 4 SIGKILLs, 8 partitions, 4 double faults, 374 reads, 33 successful swaps
+seed 10 exit=0 process campaign: 1005 ops, 5 unknown, 1 SIGKILLs, 2 partitions, 1 double faults, 417 reads, 29 successful swaps
+seed 11 exit=0 process campaign: 1005 ops, 7 unknown, 2 SIGKILLs, 3 partitions, 1 double faults, 402 reads, 35 successful swaps
+seed 12 exit=0 process campaign: 1005 ops, 10 unknown, 2 SIGKILLs, 3 partitions, 1 double faults, 404 reads, 25 successful swaps
+
+## BEFORE the fix (same code and tests, durable log never truncated)
+seed 1 (first campaign) exit=1 1005 ops, 174 unknown: history for key k0 has no valid order (not diagnosed; see D-0056)
+seed 2 (first campaign) exit=0
+seed 3 (first campaign) exit=1 1005 ops, 621 unknown: no valid order (not diagnosed)
+seed 2 (second hunt)    exit=1 1005 ops, 830 unknown, 837 s: cluster wedged, nodes logged 'append at index N leaves a hole after M' on every tick; checker out of budget
+
+## MUTATION (AwaitReadPoint returns immediately, so reads skip the leadership/apply wait), with the fix in place
+seed 1 exit=1 1005 ops, 9 unknown, 2 SIGKILLs, 4 partitions, 2 double faults, 420 reads, 18 successful swaps -> history for key k0 has no valid order
+seed 2 exit=1 1005 ops, 17 unknown, 4 SIGKILLs, 6 partitions, 3 double faults, 412 reads, 7 successful swaps -> history for key k0 has no valid order
+seed 3 exit=1 1005 ops, 5 unknown, 2 SIGKILLs, 3 partitions, 1 double faults, 413 reads, 26 successful swaps -> history for key k0 has no valid order
