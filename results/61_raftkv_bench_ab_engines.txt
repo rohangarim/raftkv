@@ -1,0 +1,158 @@
+# A/B of storage engines: raftkv_bench
+# recorded: 2026-11-14T09:18:54Z
+# git: 817e826 + uncommitted changes
+# machine: Apple M4, 10 cores, 16 GiB, Darwin 25.3.0
+# shared machine: other work was running; load is recorded per run
+# command: build/bench/raftkv_bench --engine <builtin|lsmtree> --seconds 4 --repeat 1
+# rounds: 3, engines alternate within each round
+
+## round 1: builtin   (load before: 5.03)
+# raftkv benchmark
+# storage engine: builtin
+# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append
+# value=100 B, 4 s per measurement (+1 s warm-up), 1 repeats, batch=100 keys
+
+append + fsync (raw)     1 thr         265 ops/s     p50    3.95  p95    4.14  p99    7.99 ms
+
+put (1 key/request)      1 thr          87 ops/s    (min 87, max 87, spread  0.0%)  p50   11.60  p95   14.87  p99   19.25 ms
+put (1 key/request)      4 thr         119 ops/s    (min 119, max 119, spread  0.0%)  p50   33.02  p95   54.20  p99   61.96 ms
+put (1 key/request)     16 thr         291 ops/s    (min 291, max 291, spread  0.0%)  p50   54.04  p95   89.12  p99  106.94 ms
+batch write              1 thr        7384 keys/s   (min 7384, max 7384, spread  0.0%)  p50   12.92  p95   19.08  p99   27.13 ms
+batch write              4 thr        7164 keys/s   (min 7164, max 7164, spread  0.0%)  p50   50.63  p95   84.84  p99  215.68 ms
+get (linearizable)       1 thr        6293 ops/s    (min 6293, max 6293, spread  0.0%)  p50    0.16  p95    0.19  p99    0.22 ms
+get (linearizable)       4 thr       10002 ops/s    (min 10002, max 10002, spread  0.0%)  p50    0.40  p95    0.52  p99    0.57 ms
+get (linearizable)      16 thr       10527 ops/s    (min 10527, max 10527, spread  0.0%)  p50    0.70  p95    0.94  p99    1.08 ms
+scan 100 rows            1 thr       59875 rows/s   (min 59875, max 59875, spread  0.0%)  p50    1.65  p95    2.38  p99    2.46 ms
+scan 100 rows            4 thr      145586 rows/s   (min 145586, max 145586, spread  0.0%)  p50    2.68  p95    3.99  p99    4.39 ms
+transfer, one shard      1 thr          88 txn/s    (min 88, max 88, spread  0.0%)  p50   11.12  p95   12.08  p99   16.14 ms
+transfer, one shard      4 thr          98 txn/s    (min 98, max 98, spread  0.0%)  p50   40.90  p95   55.96  p99   73.93 ms  conflict-retries=5
+transfer, one shard      8 thr         101 txn/s    (min 101, max 101, spread  0.0%)  p50   46.36  p95   75.97  p99 1038.76 ms  conflict-retries=10
+transfer, cross-shard    1 thr          22 txn/s    (min 22, max 22, spread  0.0%)  p50   44.86  p95   53.29  p99   62.98 ms
+transfer, cross-shard    4 thr          28 txn/s    (min 28, max 28, spread  0.0%)  p50  142.00  p95  188.04  p99  200.10 ms
+transfer, cross-shard    8 thr          35 txn/s    (min 35, max 35, spread  0.0%)  p50  196.23  p95  629.17  p99 1184.51 ms  conflict-retries=3
+
+## round 1: lsmtree   (load before: 4.80)
+# raftkv benchmark
+# storage engine: lsmtree
+# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append
+# value=100 B, 4 s per measurement (+1 s warm-up), 1 repeats, batch=100 keys
+
+append + fsync (raw)     1 thr         221 ops/s     p50    3.99  p95    8.02  p99   11.95 ms
+
+put (1 key/request)      1 thr          72 ops/s    (min 72, max 72, spread  0.0%)  p50   12.05  p95   26.88  p99   32.10 ms
+put (1 key/request)      4 thr         113 ops/s    (min 113, max 113, spread  0.0%)  p50   34.20  p95   57.29  p99   72.00 ms
+put (1 key/request)     16 thr         239 ops/s    (min 239, max 239, spread  0.0%)  p50   62.21  p95  111.58  p99  155.69 ms
+batch write              1 thr        7285 keys/s   (min 7285, max 7285, spread  0.0%)  p50   13.72  p95   18.22  p99   31.54 ms
+batch write              4 thr        9231 keys/s   (min 9231, max 9231, spread  0.0%)  p50   43.35  p95   67.14  p99   97.37 ms
+get (linearizable)       1 thr        6061 ops/s    (min 6061, max 6061, spread  0.0%)  p50    0.17  p95    0.19  p99    0.30 ms
+get (linearizable)       4 thr       10439 ops/s    (min 10439, max 10439, spread  0.0%)  p50    0.38  p95    0.48  p99    0.53 ms
+get (linearizable)      16 thr       11106 ops/s    (min 11106, max 11106, spread  0.0%)  p50    0.66  p95    0.88  p99    0.99 ms
+scan 100 rows            1 thr      500067 rows/s   (min 500067, max 500067, spread  0.0%)  p50    0.20  p95    0.22  p99    0.28 ms
+scan 100 rows            4 thr      914106 rows/s   (min 914106, max 914106, spread  0.0%)  p50    0.43  p95    0.55  p99    0.60 ms
+transfer, one shard      1 thr          91 txn/s    (min 91, max 91, spread  0.0%)  p50   11.22  p95   12.14  p99   14.89 ms
+transfer, one shard      4 thr          99 txn/s    (min 99, max 99, spread  0.0%)  p50   40.97  p95   52.87  p99   60.01 ms  conflict-retries=1
+transfer, one shard      8 thr          83 txn/s    (min 83, max 83, spread  0.0%)  p50   56.48  p95  966.57  p99 1066.11 ms  conflict-retries=12
+transfer, cross-shard    1 thr          16 txn/s    (min 16, max 16, spread  0.0%)  p50   56.61  p95   85.51  p99   87.31 ms
+transfer, cross-shard    4 thr          27 txn/s    (min 27, max 27, spread  0.0%)  p50  150.27  p95  200.45  p99  211.40 ms
+transfer, cross-shard    8 thr          33 txn/s    (min 33, max 33, spread  0.0%)  p50  217.78  p95  351.28  p99 1219.26 ms  conflict-retries=1
+
+## round 2: builtin   (load before: 7.09)
+# raftkv benchmark
+# storage engine: builtin
+# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append
+# value=100 B, 4 s per measurement (+1 s warm-up), 1 repeats, batch=100 keys
+
+append + fsync (raw)     1 thr         249 ops/s     p50    3.95  p95    4.76  p99   10.32 ms
+
+put (1 key/request)      1 thr          69 ops/s    (min 69, max 69, spread  0.0%)  p50   12.05  p95   26.09  p99   29.72 ms
+put (1 key/request)      4 thr         114 ops/s    (min 114, max 114, spread  0.0%)  p50   33.60  p95   54.33  p99   66.49 ms
+put (1 key/request)     16 thr         250 ops/s    (min 250, max 250, spread  0.0%)  p50   64.94  p95  101.92  p99  109.69 ms
+batch write              1 thr        5768 keys/s   (min 5768, max 5768, spread  0.0%)  p50   15.05  p95   31.58  p99   35.18 ms
+batch write              4 thr       10637 keys/s   (min 10637, max 10637, spread  0.0%)  p50   36.31  p95   60.23  p99   79.81 ms
+get (linearizable)       1 thr        4895 ops/s    (min 4895, max 4895, spread  0.0%)  p50    0.18  p95    0.32  p99    0.38 ms
+get (linearizable)       4 thr        9802 ops/s    (min 9802, max 9802, spread  0.0%)  p50    0.40  p95    0.53  p99    0.61 ms
+get (linearizable)      16 thr       10852 ops/s    (min 10852, max 10852, spread  0.0%)  p50    0.67  p95    0.90  p99    1.01 ms
+scan 100 rows            1 thr       62038 rows/s   (min 62038, max 62038, spread  0.0%)  p50    1.58  p95    2.38  p99    2.63 ms
+scan 100 rows            4 thr      193402 rows/s   (min 193402, max 193402, spread  0.0%)  p50    2.02  p95    3.07  p99    3.30 ms
+transfer, one shard      1 thr          88 txn/s    (min 88, max 88, spread  0.0%)  p50   11.15  p95   13.11  p99   18.97 ms
+transfer, one shard      4 thr          99 txn/s    (min 99, max 99, spread  0.0%)  p50   38.99  p95   58.32  p99   78.99 ms  conflict-retries=3
+transfer, one shard      8 thr         102 txn/s    (min 102, max 102, spread  0.0%)  p50   49.70  p95   98.20  p99 1007.31 ms  conflict-retries=11
+transfer, cross-shard    1 thr          22 txn/s    (min 22, max 22, spread  0.0%)  p50   45.04  p95   56.02  p99   82.03 ms
+transfer, cross-shard    4 thr          25 txn/s    (min 25, max 25, spread  0.0%)  p50  160.09  p95  213.62  p99  240.71 ms
+transfer, cross-shard    8 thr          33 txn/s    (min 33, max 33, spread  0.0%)  p50  211.93  p95 1106.14  p99 1187.57 ms  conflict-retries=1
+
+## round 2: lsmtree   (load before: 4.70)
+# raftkv benchmark
+# storage engine: lsmtree
+# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append
+# value=100 B, 4 s per measurement (+1 s warm-up), 1 repeats, batch=100 keys
+
+append + fsync (raw)     1 thr         253 ops/s     p50    3.98  p95    4.10  p99   10.51 ms
+
+put (1 key/request)      1 thr          62 ops/s    (min 62, max 62, spread  0.0%)  p50   14.74  p95   26.41  p99   30.23 ms
+put (1 key/request)      4 thr         111 ops/s    (min 111, max 111, spread  0.0%)  p50   34.35  p95   57.04  p99   66.06 ms
+put (1 key/request)     16 thr         234 ops/s    (min 234, max 234, spread  0.0%)  p50   64.80  p95  113.59  p99  135.53 ms
+batch write              1 thr        6442 keys/s   (min 6442, max 6442, spread  0.0%)  p50   14.59  p95   25.44  p99   27.22 ms
+batch write              4 thr        8639 keys/s   (min 8639, max 8639, spread  0.0%)  p50   46.13  p95   67.95  p99   78.50 ms
+get (linearizable)       1 thr        6335 ops/s    (min 6335, max 6335, spread  0.0%)  p50    0.16  p95    0.20  p99    0.28 ms
+get (linearizable)       4 thr       11499 ops/s    (min 11499, max 11499, spread  0.0%)  p50    0.34  p95    0.45  p99    0.52 ms
+get (linearizable)      16 thr       11056 ops/s    (min 11056, max 11056, spread  0.0%)  p50    0.67  p95    0.90  p99    1.03 ms
+scan 100 rows            1 thr      569163 rows/s   (min 569163, max 569163, spread  0.0%)  p50    0.18  p95    0.21  p99    0.30 ms
+scan 100 rows            4 thr     1064992 rows/s   (min 1064992, max 1064992, spread  0.0%)  p50    0.37  p95    0.48  p99    0.54 ms
+transfer, one shard      1 thr          60 txn/s    (min 60, max 60, spread  0.0%)  p50   14.17  p95   27.16  p99   31.56 ms
+transfer, one shard      4 thr          94 txn/s    (min 94, max 94, spread  0.0%)  p50   42.07  p95   59.89  p99   75.32 ms  conflict-retries=2
+transfer, one shard      8 thr         103 txn/s    (min 103, max 103, spread  0.0%)  p50   48.86  p95  101.12  p99 1008.70 ms  conflict-retries=10
+transfer, cross-shard    1 thr          21 txn/s    (min 21, max 21, spread  0.0%)  p50   46.66  p95   57.90  p99   71.54 ms
+transfer, cross-shard    4 thr          28 txn/s    (min 28, max 28, spread  0.0%)  p50  142.49  p95  184.93  p99  225.16 ms  conflict-retries=1
+transfer, cross-shard    8 thr          34 txn/s    (min 34, max 34, spread  0.0%)  p50  207.98  p95  309.18  p99 1165.94 ms
+
+## round 3: builtin   (load before: 3.70)
+# raftkv benchmark
+# storage engine: builtin
+# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append
+# value=100 B, 4 s per measurement (+1 s warm-up), 1 repeats, batch=100 keys
+
+append + fsync (raw)     1 thr         248 ops/s     p50    3.96  p95    4.88  p99    9.61 ms
+
+put (1 key/request)      1 thr          87 ops/s    (min 87, max 87, spread  0.0%)  p50   11.85  p95   13.04  p99   21.39 ms
+put (1 key/request)      4 thr         114 ops/s    (min 114, max 114, spread  0.0%)  p50   35.03  p95   51.30  p99   61.16 ms
+put (1 key/request)     16 thr         299 ops/s    (min 299, max 299, spread  0.0%)  p50   51.03  p95   81.67  p99   91.75 ms
+batch write              1 thr        7772 keys/s   (min 7772, max 7772, spread  0.0%)  p50   12.82  p95   16.15  p99   18.09 ms
+batch write              4 thr        9688 keys/s   (min 9688, max 9688, spread  0.0%)  p50   41.10  p95   67.80  p99   75.38 ms
+get (linearizable)       1 thr        5860 ops/s    (min 5860, max 5860, spread  0.0%)  p50    0.17  p95    0.19  p99    0.20 ms
+get (linearizable)       4 thr       11448 ops/s    (min 11448, max 11448, spread  0.0%)  p50    0.35  p95    0.44  p99    0.48 ms
+get (linearizable)      16 thr       11168 ops/s    (min 11168, max 11168, spread  0.0%)  p50    0.66  p95    0.87  p99    0.98 ms
+scan 100 rows            1 thr       38652 rows/s   (min 38652, max 38652, spread  0.0%)  p50    2.44  p95    4.67  p99    4.83 ms
+scan 100 rows            4 thr      131627 rows/s   (min 131627, max 131627, spread  0.0%)  p50    2.83  p95    5.51  p99    5.85 ms
+transfer, one shard      1 thr          85 txn/s    (min 85, max 85, spread  0.0%)  p50   11.94  p95   13.04  p99   15.25 ms
+transfer, one shard      4 thr         104 txn/s    (min 104, max 104, spread  0.0%)  p50   38.10  p95   52.85  p99   61.87 ms  conflict-retries=3
+transfer, one shard      8 thr         107 txn/s    (min 107, max 107, spread  0.0%)  p50   45.00  p95   80.28  p99 1029.76 ms  conflict-retries=8
+transfer, cross-shard    1 thr          22 txn/s    (min 22, max 22, spread  0.0%)  p50   45.97  p95   48.95  p99   51.68 ms
+transfer, cross-shard    4 thr          29 txn/s    (min 29, max 29, spread  0.0%)  p50  139.27  p95  186.37  p99  193.86 ms
+transfer, cross-shard    8 thr          35 txn/s    (min 35, max 35, spread  0.0%)  p50  192.21  p95 1113.66  p99 1162.86 ms  conflict-retries=2
+
+## round 3: lsmtree   (load before: 3.60)
+# raftkv benchmark
+# storage engine: lsmtree
+# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append
+# value=100 B, 4 s per measurement (+1 s warm-up), 1 repeats, batch=100 keys
+
+append + fsync (raw)     1 thr         256 ops/s     p50    3.96  p95    4.12  p99   12.10 ms
+
+put (1 key/request)      1 thr          87 ops/s    (min 87, max 87, spread  0.0%)  p50   11.92  p95   15.72  p99   17.46 ms
+put (1 key/request)      4 thr         114 ops/s    (min 114, max 114, spread  0.0%)  p50   33.73  p95   55.17  p99   69.73 ms
+put (1 key/request)     16 thr         236 ops/s    (min 236, max 236, spread  0.0%)  p50   62.92  p95  117.94  p99  281.73 ms
+batch write              1 thr        7647 keys/s   (min 7647, max 7647, spread  0.0%)  p50   13.01  p95   17.14  p99   19.69 ms
+batch write              4 thr       10175 keys/s   (min 10175, max 10175, spread  0.0%)  p50   38.83  p95   62.03  p99   73.20 ms
+get (linearizable)       1 thr        5798 ops/s    (min 5798, max 5798, spread  0.0%)  p50    0.17  p95    0.20  p99    0.21 ms
+get (linearizable)       4 thr       10543 ops/s    (min 10543, max 10543, spread  0.0%)  p50    0.38  p95    0.48  p99    0.55 ms
+get (linearizable)      16 thr       11285 ops/s    (min 11285, max 11285, spread  0.0%)  p50    0.66  p95    0.87  p99    0.97 ms
+scan 100 rows            1 thr      508178 rows/s   (min 508178, max 508178, spread  0.0%)  p50    0.20  p95    0.22  p99    0.24 ms
+scan 100 rows            4 thr      985285 rows/s   (min 985285, max 985285, spread  0.0%)  p50    0.40  p95    0.51  p99    0.55 ms
+transfer, one shard      1 thr          80 txn/s    (min 80, max 80, spread  0.0%)  p50   12.24  p95   16.66  p99   20.09 ms
+transfer, one shard      4 thr          99 txn/s    (min 99, max 99, spread  0.0%)  p50   40.07  p95   53.09  p99   79.74 ms  conflict-retries=5
+transfer, one shard      8 thr         105 txn/s    (min 105, max 105, spread  0.0%)  p50   49.79  p95   84.84  p99 1040.68 ms  conflict-retries=9
+transfer, cross-shard    1 thr          21 txn/s    (min 21, max 21, spread  0.0%)  p50   48.77  p95   55.18  p99   59.66 ms
+transfer, cross-shard    4 thr          28 txn/s    (min 28, max 28, spread  0.0%)  p50  139.91  p95  191.96  p99  220.73 ms  conflict-retries=1
+transfer, cross-shard    8 thr          34 txn/s    (min 34, max 34, spread  0.0%)  p50  200.70  p95  994.52  p99 1199.04 ms
+

@@ -1,0 +1,113 @@
+# A/B of storage engines: engine_bench
+# recorded: 2026-11-14T09:16:13Z
+# git: 817e826 + uncommitted changes
+# machine: Apple M4, 10 cores, 16 GiB, Darwin 25.3.0
+# shared machine: other work was running; load is recorded per run
+# command: build/bench/engine_bench --engine <builtin|lsmtree> --keys 200000 --seconds 4 --threads 4
+# rounds: 3, engines alternate within each round
+
+## round 1: builtin   (load before: 5.27)
+04:16:13.585952 INFO  db.cc:146] lsm: recovered 0 wal records, 0 tables, last sequence 0
+# engine benchmark
+# engine: builtin   keys=200000 value=100 B   4 s per measurement   sync_on_write=off
+# open of an empty directory: 0.32 ms
+# preloaded 200000 keys (+1/3 overwritten)
+
+apply (3-op atomic batch)      1 thr       74380 batch/s   p50   0.001  p95   0.001  p99   0.002 ms
+get (random point read)        1 thr      140632 ops/s     p50   0.007  p95   0.009  p99   0.010 ms
+get (random point read)        4 thr      311241 ops/s     p50   0.012  p95   0.021  p99   0.026 ms
+scan 100 rows (bounded)        1 thr     1057990 rows/s    p50   0.094  p95   0.107  p99   0.114 ms
+scan 100 rows (open-ended)     1 thr        1169 rows/s    p50  82.842  p95 162.486  p99 171.571 ms
+writer alone                 window    1.018 s  writer    38186 batch/s  p50   0.001  p99   0.002  max 1035.153 ms
+writer during snapshot scan  window    1.438 s  writer    35694 batch/s  p50   0.001  p99   0.002  max 1115.635 ms
+snapshot scan                200065 rows in 1.438 s (139113 rows/s)
+writer alone (after)         window    1.443 s  writer    35570 batch/s  p50   0.001  p99   0.002  max 1232.935 ms
+
+## round 1: lsmtree   (load before: 4.64)
+# engine benchmark
+# engine: lsmtree   keys=200000 value=100 B   4 s per measurement   sync_on_write=off
+# open of an empty directory: 40.39 ms
+# preloaded 200000 keys (+1/3 overwritten)
+
+apply (3-op atomic batch)      1 thr      132349 batch/s   p50   0.003  p95   0.011  p99   0.026 ms
+get (random point read)        1 thr      532118 ops/s     p50   0.002  p95   0.003  p99   0.004 ms
+get (random point read)        4 thr      917680 ops/s     p50   0.003  p95   0.011  p99   0.021 ms
+scan 100 rows (bounded)        1 thr     4504261 rows/s    p50   0.022  p95   0.030  p99   0.033 ms
+scan 100 rows (open-ended)     1 thr     4761352 rows/s    p50   0.021  p95   0.029  p99   0.031 ms
+writer alone                 window    0.505 s  writer   147218 batch/s  p50   0.003  p99   0.021  max   11.484 ms
+writer during snapshot scan  window    0.045 s  writer   171780 batch/s  p50   0.003  p99   0.029  max    4.859 ms
+snapshot scan                200065 rows in 0.045 s (4403231 rows/s)
+writer alone (after)         window    0.505 s  writer   133004 batch/s  p50   0.003  p99   0.025  max    9.080 ms
+
+# engine counters: writes=2460684 flushes=66 compactions=44 write_amp=3.63x stalls=10
+
+## round 2: builtin   (load before: 6.23)
+04:17:03.621456 INFO  db.cc:146] lsm: recovered 0 wal records, 0 tables, last sequence 0
+# engine benchmark
+# engine: builtin   keys=200000 value=100 B   4 s per measurement   sync_on_write=off
+# open of an empty directory: 0.32 ms
+# preloaded 200000 keys (+1/3 overwritten)
+
+apply (3-op atomic batch)      1 thr       75018 batch/s   p50   0.001  p95   0.002  p99   0.002 ms
+get (random point read)        1 thr      137594 ops/s     p50   0.007  p95   0.010  p99   0.010 ms
+get (random point read)        4 thr      305402 ops/s     p50   0.012  p95   0.022  p99   0.027 ms
+scan 100 rows (bounded)        1 thr     1047458 rows/s    p50   0.095  p95   0.108  p99   0.116 ms
+scan 100 rows (open-ended)     1 thr        1155 rows/s    p50  89.064  p95 168.957  p99 170.146 ms
+writer alone                 window    1.076 s  writer    23847 batch/s  p50   0.002  p99   0.002  max 1157.792 ms
+writer during snapshot scan  window    1.508 s  writer    34045 batch/s  p50   0.002  p99   0.002  max 1153.476 ms
+snapshot scan                200065 rows in 1.508 s (132679 rows/s)
+writer alone (after)         window    1.518 s  writer    33818 batch/s  p50   0.002  p99   0.002  max 1348.819 ms
+
+## round 2: lsmtree   (load before: 5.28)
+# engine benchmark
+# engine: lsmtree   keys=200000 value=100 B   4 s per measurement   sync_on_write=off
+# open of an empty directory: 39.39 ms
+# preloaded 200000 keys (+1/3 overwritten)
+
+apply (3-op atomic batch)      1 thr      129877 batch/s   p50   0.003  p95   0.012  p99   0.027 ms
+get (random point read)        1 thr      487559 ops/s     p50   0.002  p95   0.003  p99   0.004 ms
+get (random point read)        4 thr      680011 ops/s     p50   0.005  p95   0.015  p99   0.024 ms
+scan 100 rows (bounded)        1 thr     4431537 rows/s    p50   0.022  p95   0.031  p99   0.036 ms
+scan 100 rows (open-ended)     1 thr     4602480 rows/s    p50   0.022  p95   0.030  p99   0.032 ms
+writer alone                 window    0.500 s  writer   115459 batch/s  p50   0.004  p99   0.029  max   12.617 ms
+writer during snapshot scan  window    0.040 s  writer   107576 batch/s  p50   0.004  p99   0.024  max    9.432 ms
+snapshot scan                200065 rows in 0.040 s (5041495 rows/s)
+writer alone (after)         window    0.510 s  writer   124476 batch/s  p50   0.004  p99   0.028  max   11.113 ms
+
+# engine counters: writes=2362263 flushes=63 compactions=42 write_amp=3.62x stalls=10
+
+## round 3: builtin   (load before: 4.63)
+04:17:54.006657 INFO  db.cc:146] lsm: recovered 0 wal records, 0 tables, last sequence 0
+# engine benchmark
+# engine: builtin   keys=200000 value=100 B   4 s per measurement   sync_on_write=off
+# open of an empty directory: 0.39 ms
+# preloaded 200000 keys (+1/3 overwritten)
+
+apply (3-op atomic batch)      1 thr       70813 batch/s   p50   0.002  p95   0.002  p99   0.002 ms
+get (random point read)        1 thr      118084 ops/s     p50   0.008  p95   0.011  p99   0.012 ms
+get (random point read)        4 thr      205463 ops/s     p50   0.019  p95   0.028  p99   0.032 ms
+scan 100 rows (bounded)        1 thr      993738 rows/s    p50   0.099  p95   0.127  p99   0.146 ms
+scan 100 rows (open-ended)     1 thr        1068 rows/s    p50  89.675  p95 186.255  p99 189.463 ms
+writer alone                 window    1.175 s  writer    39125 batch/s  p50   0.002  p99   0.002  max 1185.013 ms
+writer during snapshot scan  window    1.546 s  writer    33205 batch/s  p50   0.002  p99   0.002  max 1193.731 ms
+snapshot scan                200065 rows in 1.546 s (129415 rows/s)
+writer alone (after)         window    1.556 s  writer    32991 batch/s  p50   0.002  p99   0.002  max 1362.625 ms
+
+## round 3: lsmtree   (load before: 4.96)
+# engine benchmark
+# engine: lsmtree   keys=200000 value=100 B   4 s per measurement   sync_on_write=off
+# open of an empty directory: 58.57 ms
+# preloaded 200000 keys (+1/3 overwritten)
+
+apply (3-op atomic batch)      1 thr      123175 batch/s   p50   0.004  p95   0.013  p99   0.029 ms
+get (random point read)        1 thr      513344 ops/s     p50   0.002  p95   0.003  p99   0.003 ms
+get (random point read)        4 thr      698299 ops/s     p50   0.005  p95   0.015  p99   0.024 ms
+scan 100 rows (bounded)        1 thr     5942846 rows/s    p50   0.017  p95   0.023  p99   0.028 ms
+scan 100 rows (open-ended)     1 thr     6283164 rows/s    p50   0.016  p95   0.022  p99   0.023 ms
+writer alone                 window    0.501 s  writer   120569 batch/s  p50   0.004  p99   0.030  max    7.931 ms
+writer during snapshot scan  window    0.037 s  writer    92548 batch/s  p50   0.006  p99   0.051  max    3.890 ms
+snapshot scan                200065 rows in 0.037 s (5360655 rows/s)
+writer alone (after)         window    0.510 s  writer   123871 batch/s  p50   0.004  p99   0.028  max    9.365 ms
+
+# engine counters: writes=2308491 flushes=62 compactions=40 write_amp=3.60x stalls=10
+

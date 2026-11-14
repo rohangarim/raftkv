@@ -1,0 +1,36 @@
+# Sanitizer runs of the engine layer (both engines)
+# recorded: 2026-11-14T08:40:49Z
+# git: 47f0346 + uncommitted engine work (rebased later)
+# command: cmake --preset <p>; cmake --build --preset <p> --target engine_conformance_test; build/<p>/test/engine_conformance_test
+# scope: ONLY the engine conformance suite (49 tests across builtin + lsmtree: 48 pass, 1 is skipped by design because lsmtree is built in). It has no gRPC dependency, so it
+#        is what could be built under each sanitizer quickly. The full-system sanitizer gate (scripts/ci.sh) was
+#        not run for this change; see DECISIONS.md.
+# TSAN_OPTIONS=halt_on_error=1  ASAN_OPTIONS=detect_leaks=0 (LeakSanitizer does not exist on macOS/arm64)  UBSAN halt_on_error=1
+
+##### tsan
+Running main() from /Users/rohangarimella/raft/.deps/googletest-src/googletest/src/gtest_main.cc
+[==========] Running 49 tests from 2 test suites.
+[  SKIPPED ] EngineKindTest.OpeningAnUnavailableEngineFailsLoudly (0 ms)
+[==========] 49 tests from 2 test suites ran. (54505 ms total)
+[  PASSED  ] 48 tests.
+[  SKIPPED ] 1 test, listed below:
+[  SKIPPED ] EngineKindTest.OpeningAnUnavailableEngineFailsLoudly
+exit=0
+##### asan
+Running main() from /Users/rohangarimella/raft/.deps/googletest-src/googletest/src/gtest_main.cc
+[==========] Running 49 tests from 2 test suites.
+[  SKIPPED ] EngineKindTest.OpeningAnUnavailableEngineFailsLoudly (3 ms)
+[==========] 49 tests from 2 test suites ran. (37079 ms total)
+[  PASSED  ] 48 tests.
+[  SKIPPED ] 1 test, listed below:
+[  SKIPPED ] EngineKindTest.OpeningAnUnavailableEngineFailsLoudly
+exit=0
+##### ubsan
+Running main() from /Users/rohangarimella/raft/.deps/googletest-src/googletest/src/gtest_main.cc
+[==========] Running 49 tests from 2 test suites.
+[  SKIPPED ] EngineKindTest.OpeningAnUnavailableEngineFailsLoudly (0 ms)
+[==========] 49 tests from 2 test suites ran. (13451 ms total)
+[  PASSED  ] 48 tests.
+[  SKIPPED ] 1 test, listed below:
+[  SKIPPED ] EngineKindTest.OpeningAnUnavailableEngineFailsLoudly
+exit=0

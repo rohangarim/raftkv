@@ -1,0 +1,45 @@
+# Node-kill linearizability campaign on both storage engines
+# recorded: 2026-11-14T09:45:18Z
+# git: 441277e + uncommitted fixes: RaftGrpcService null driver, RaftDriver dispatch after Stop (D-0062)
+# machine: Apple M4, 10 cores, Darwin 25.3.0; shared with other sessions, load recorded per run
+# command: RAFTKV_ENGINE=<e> RAFTKV_LIN_SEED=<n> /Users/rohangarimella/raft-wt/engine/build/test/linearizability_cluster_test --gtest_filter=*HistoryUnderNodeKills*   (rc=0 pass, 134 abort, 139 segfault)
+# engines alternate within each seed
+## campaign seeds 1-6
+seed 1  builtin  load_before=5.16  rc=0
+seed 1  lsmtree  load_before=4.62  rc=0
+seed 2  builtin  load_before=4.14  rc=0
+seed 2  lsmtree  load_before=4.12  rc=0
+seed 3  builtin  load_before=3.70  rc=0
+seed 3  lsmtree  load_before=3.89  rc=0
+seed 4  builtin  load_before=3.84  rc=0
+seed 4  lsmtree  load_before=3.65  rc=0
+seed 5  builtin  load_before=3.39  rc=0
+seed 5  lsmtree  load_before=3.61  rc=0
+seed 6  builtin  load_before=3.37  rc=0
+seed 6  lsmtree  load_before=3.30  rc=0
+## stress: seeds 2 and 3, 6 rounds, engines alternating
+seed 2  builtin  load_before=2.93  rc=0
+seed 2  lsmtree  load_before=3.18  rc=0
+seed 3  builtin  load_before=3.54  rc=0
+seed 3  lsmtree  load_before=3.76  rc=0
+seed 2  builtin  load_before=3.52  rc=0
+seed 2  lsmtree  load_before=3.36  rc=0
+seed 3  builtin  load_before=3.45  rc=0
+seed 3  lsmtree  load_before=3.15  rc=0
+seed 2  builtin  load_before=2.90  rc=0
+seed 2  lsmtree  load_before=2.77  rc=0
+seed 3  builtin  load_before=2.59  rc=0
+seed 3  lsmtree  load_before=2.88  rc=0
+seed 2  builtin  load_before=2.98  rc=0
+seed 2  lsmtree  load_before=3.29  rc=0
+seed 3  builtin  load_before=2.93  rc=0
+seed 3  lsmtree  load_before=2.79  rc=0
+seed 2  builtin  load_before=2.94  rc=0
+seed 2  lsmtree  load_before=3.03  rc=0
+seed 3  builtin  load_before=2.95  rc=0
+seed 3  lsmtree  load_before=2.96  rc=0
+seed 2  builtin  load_before=2.88  rc=0
+seed 2  lsmtree  load_before=3.12  rc=0
+seed 3  builtin  load_before=3.63  rc=0
+seed 3  lsmtree  load_before=3.68  rc=0
+## end
