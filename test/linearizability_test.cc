@@ -128,6 +128,7 @@ TEST(Linearizability, TwoConcurrentSwapsCannotBothWin) {
 
 TEST(Linearizability, ManyOverlappingWritersStayTractable) {
   std::vector<HistoryOp> h;
+  h.reserve(13);
   uint64_t t = 1;
   for (int i = 0; i < 12; ++i) h.push_back(Put("k", "v" + std::to_string(i), t++, 1000 + i));
   h.push_back(Get("k", "v11", 2000, 2001));

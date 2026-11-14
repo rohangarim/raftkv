@@ -115,6 +115,7 @@ class LinearizabilityClusterTest : public GrpcClusterFixture {
     });
 
     std::vector<std::thread> workers;
+    workers.reserve(static_cast<size_t>(c.threads));
     for (int t = 0; t < c.threads; ++t) {
       workers.emplace_back([&, t] {
         std::mt19937_64 rng(c.seed * 104729 + static_cast<uint64_t>(t));
@@ -221,6 +222,7 @@ class LinearizabilityClusterTest : public GrpcClusterFixture {
 
 TEST_F(LinearizabilityClusterTest, HistoryUnderNodeKillsIsLinearizable) {
   Campaign c;
+  // NOLINTNEXTLINE(concurrency-mt-unsafe): read once, before any thread starts.
   if (const char* s = std::getenv("RAFTKV_LIN_SEED")) c.seed = std::strtoull(s, nullptr, 10);
   const Outcome out = RunCampaign(c);
 
