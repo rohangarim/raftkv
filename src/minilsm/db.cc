@@ -1,11 +1,11 @@
-#include "lsm/db.h"
+#include "minilsm/db.h"
 
 #include <algorithm>
 #include <functional>
 #include <map>
 #include <utility>
 
-#include "lsm/coding.h"
+#include "minilsm/coding.h"
 
 #include "common/log.h"
 

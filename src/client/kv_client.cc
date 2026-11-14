@@ -555,9 +555,10 @@ Result<std::optional<std::string>> KvClient::TxnDecision(const std::string& txid
   proto::TxnStatusRequest request;
   request.set_txid(txid);
   proto::KvResponse response;
-  const Status s = Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
-                               proto::KvResponse* out) { return stub->TxnStatus(ctx, request, out); },
-                           &response);
+  const Status s =
+      Execute([&](proto::Kv::Stub* stub, grpc::ClientContext* ctx,
+                  proto::KvResponse* out) { return stub->TxnStatus(ctx, request, out); },
+              &response);
   if (!s.IsOk()) {
     return s;
   }

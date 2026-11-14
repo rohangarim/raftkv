@@ -20,8 +20,8 @@
 #include <string>
 #include <string_view>
 
-#include "lsm/internal_key.h"
-#include "lsm/status.h"
+#include "minilsm/internal_key.h"
+#include "minilsm/status.h"
 
 namespace raftkv::lsm {
 

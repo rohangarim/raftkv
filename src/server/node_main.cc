@@ -24,7 +24,7 @@
 
 #include <grpcpp/grpcpp.h>
 
-#include "lsm/db.h"
+#include "engine/engine.h"
 
 #include "common/log.h"
 #include "server/raft_driver.h"
@@ -42,6 +42,7 @@ struct ParsedArgs {
   uint64_t id = 0;
   std::filesystem::path dir;
   std::unordered_map<uint64_t, std::string> peers;  // includes self
+  raftkv::engine::Kind engine = raftkv::engine::DefaultKind();
 };
 
 bool ParsePeers(const std::string& spec, std::unordered_map<uint64_t, std::string>* out) {
@@ -71,6 +72,14 @@ bool Parse(int argc, char** argv, ParsedArgs* out) {
       out->id = std::strtoull(next().c_str(), nullptr, 10);
     } else if (arg == "--dir") {
       out->dir = next();
+    } else if (arg == "--engine") {
+      auto kind = raftkv::engine::ParseKind(next());
+      if (!kind.IsOk() || !raftkv::engine::Available(*kind)) {
+        std::fprintf(stderr, "--engine: %s\n",
+                     kind.IsOk() ? "not part of this build" : kind.GetStatus().ToString().c_str());
+        return false;
+      }
+      out->engine = *kind;
     } else if (arg == "--peers") {
       if (!ParsePeers(next(), &out->peers)) {
         std::fprintf(stderr, "invalid --peers spec\n");
@@ -84,7 +93,7 @@ bool Parse(int argc, char** argv, ParsedArgs* out) {
   if (out->id == 0 || out->dir.empty() || out->peers.find(out->id) == out->peers.end()) {
     std::fprintf(stderr,
                  "usage: raftkv_node --id N --dir PATH "
-                 "--peers 1=host:port,2=host:port,...\n");
+                 "--peers 1=host:port,2=host:port,... [--engine builtin|lsmtree]\n");
     return false;
   }
   return true;
@@ -101,9 +110,10 @@ int RunNode(int argc, char** argv) {
   std::signal(SIGTERM, HandleSignal);
   std::signal(SIGINT, HandleSignal);
 
-  raftkv::lsm::Options lsm_options;
-  lsm_options.dir = args.dir / "state";
-  auto sm_opened = raftkv::statemachine::KvStateMachine::Open(std::move(lsm_options));
+  raftkv::engine::Options engine_options;
+  engine_options.dir = args.dir / "state";
+  engine_options.kind = args.engine;
+  auto sm_opened = raftkv::statemachine::KvStateMachine::Open(engine_options);
   if (!sm_opened.IsOk()) {
     std::fprintf(stderr, "failed to open state machine: %s\n",
                  sm_opened.GetStatus().ToString().c_str());

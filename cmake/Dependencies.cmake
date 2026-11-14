@@ -102,6 +102,55 @@ if(RAFTKV_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
+# lsmtree: the standalone storage engine (github.com/rohangarim/embedded-lsm-kv)
+#
+# An alternative implementation of the engine seam in src/engine/. It is a
+# separate project with its own history, so it is pinned to one commit and its
+# tests and benchmarks are never built here.
+#
+#   -DRAFTKV_WITH_LSMTREE=OFF         build without it (the built-in engine only)
+#   -DRAFTKV_LSMTREE_DIR=/path        use a local checkout instead of the pin, to
+#                                     try a newer lsmtree before moving the pin
+# ---------------------------------------------------------------------------
+option(RAFTKV_WITH_LSMTREE "Build the lsmtree storage-engine adapter" ON)
+set(RAFTKV_LSMTREE_SHA "ec569133bb4a10de040291e669de2d299c8dc745" CACHE STRING
+    "Pinned lsmtree commit")
+set(RAFTKV_LSMTREE_DIR "" CACHE PATH "Local lsmtree checkout to use instead of the pinned commit")
+
+if(RAFTKV_WITH_LSMTREE)
+  if(RAFTKV_LSMTREE_DIR)
+    set(raftkv_lsmtree_src "${RAFTKV_LSMTREE_DIR}")
+    message(STATUS "raftkv: lsmtree from local checkout ${raftkv_lsmtree_src}")
+  else()
+    string(SUBSTRING "${RAFTKV_LSMTREE_SHA}" 0 12 raftkv_lsmtree_short)
+    # Named by commit, so two checkouts pinned to different versions can share
+    # one RAFTKV_DEPS_SRC without one switching the other's sources underneath it.
+    set(raftkv_lsmtree_src "${RAFTKV_DEPS_SRC}/lsmtree-${raftkv_lsmtree_short}")
+    if(RAFTKV_FETCH_DEPS)
+      execute_process(
+        COMMAND "${CMAKE_SOURCE_DIR}/scripts/fetch_lsmtree.sh"
+                "${RAFTKV_LSMTREE_SHA}" "${raftkv_lsmtree_src}"
+        RESULT_VARIABLE lsmtree_fetch_result)
+      if(NOT lsmtree_fetch_result EQUAL 0)
+        message(FATAL_ERROR
+          "raftkv: could not fetch lsmtree ${raftkv_lsmtree_short}. Retry, or configure "
+          "with -DRAFTKV_WITH_LSMTREE=OFF to build with the built-in engine only.")
+      endif()
+    endif()
+  endif()
+  if(NOT EXISTS "${raftkv_lsmtree_src}/CMakeLists.txt")
+    message(FATAL_ERROR "raftkv: no lsmtree sources at ${raftkv_lsmtree_src}")
+  endif()
+
+  set(LSM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(LSM_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+  # SYSTEM: lsmtree's headers are compiled under raftkv's -Werror and stricter
+  # warning set in the adapter; they are not ours to hold to it.
+  add_subdirectory("${raftkv_lsmtree_src}" "${CMAKE_BINARY_DIR}/_deps/lsmtree-build"
+                   EXCLUDE_FROM_ALL SYSTEM)
+endif()
+
+# ---------------------------------------------------------------------------
 # Normalize target names across the two acquisition paths.
 # ---------------------------------------------------------------------------
 if(TARGET gRPC::grpc++)

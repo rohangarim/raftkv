@@ -4,8 +4,8 @@
 // learn anything about storage, and this header is the whole contract between
 // them.
 
-#include <cstddef>
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -15,7 +15,7 @@
 #include <string_view>
 
 #include "kv.pb.h"
-#include "lsm/status.h"
+#include "minilsm/status.h"
 
 namespace raftkv::statemachine {
 
@@ -135,8 +135,9 @@ class StateMachine {
   // Visits user keys in [start, end) in ascending order, at most `limit` of
   // them (0 = unlimited); an empty `end` is unbounded. Like Get, a local read
   // with no freshness guarantee of its own.
-  virtual Status Scan(std::string_view start, std::string_view end, size_t limit,
-                      const std::function<Status(std::string_view, std::string_view)>& fn) const = 0;
+  virtual Status Scan(
+      std::string_view start, std::string_view end, size_t limit,
+      const std::function<Status(std::string_view, std::string_view)>& fn) const = 0;
 
   // Judges [start, end) against the owned range; an empty `end` means
   // unbounded. With `write` set, a fenced range counts as kMoving. A point key

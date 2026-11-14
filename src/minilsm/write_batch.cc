@@ -1,8 +1,8 @@
-#include "lsm/write_batch.h"
+#include "minilsm/write_batch.h"
 
 #include <utility>
 
-#include "lsm/coding.h"
+#include "minilsm/coding.h"
 
 namespace raftkv::lsm {
 

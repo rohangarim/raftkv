@@ -36,7 +36,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "kv.grpc.pb.h"
-#include "lsm/status.h"
+#include "minilsm/status.h"
 
 namespace raftkv::client {
 

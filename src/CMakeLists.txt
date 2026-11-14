@@ -1,5 +1,6 @@
 add_subdirectory(common)
-add_subdirectory(lsm)
+add_subdirectory(minilsm)
+add_subdirectory(engine)
 add_subdirectory(raft)
 add_subdirectory(statemachine)
 add_subdirectory(storage)

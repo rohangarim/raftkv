@@ -1,4 +1,4 @@
-#include "lsm/wal.h"
+#include "minilsm/wal.h"
 
 #include <cerrno>
 #include <cstring>
@@ -8,9 +8,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "lsm/coding.h"
-#include "lsm/crc32c.h"
-#include "lsm/file.h"
+#include "minilsm/coding.h"
+#include "minilsm/crc32c.h"
+#include "minilsm/file.h"
 
 namespace raftkv::lsm {
 namespace {

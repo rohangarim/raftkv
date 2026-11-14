@@ -16,7 +16,7 @@
 #include <string_view>
 #include <vector>
 
-#include "lsm/status.h"
+#include "minilsm/status.h"
 
 namespace raftkv::shard {
 

@@ -25,8 +25,9 @@
 #include <string>
 #include <string_view>
 
+#include "engine/engine.h"
 #include "kv.pb.h"
-#include "lsm/db.h"
+#include "minilsm/db.h"
 
 #include "statemachine/state_machine.h"
 
@@ -37,14 +38,21 @@ namespace raftkv::statemachine {
 inline constexpr char kUserPrefix = 'u';
 inline constexpr char kMetaPrefix = 'm';
 inline constexpr char kSessionPrefix = 's';
-inline constexpr char kLockPrefix = 'l';    // l<key> -> LockRecord
-inline constexpr char kTxnPrefix = 'x';     // x<txid> -> 'C' or 'A'
+inline constexpr char kLockPrefix = 'l';  // l<key> -> LockRecord
+inline constexpr char kTxnPrefix = 'x';   // x<txid> -> 'C' or 'A'
 
 inline constexpr std::string_view kAppliedIndexKey = "applied_index";
 
 class KvStateMachine final : public StateMachine {
  public:
-  static Result<std::unique_ptr<KvStateMachine>> Open(lsm::Options options);
+  // Opens on whichever engine `options.kind` names.
+  static Result<std::unique_ptr<KvStateMachine>> Open(const engine::Options& options);
+
+  // Convenience for callers that only know the built-in engine's options. The
+  // engine is chosen by engine::DefaultKind(), i.e. the RAFTKV_ENGINE
+  // environment variable, so every caller of this -- including every test that
+  // brings up a cluster -- reruns on lsmtree with `RAFTKV_ENGINE=lsmtree`.
+  static Result<std::unique_ptr<KvStateMachine>> Open(const lsm::Options& options);
 
   ApplyResult Apply(uint64_t index, std::span<const std::byte> command) override;
   Result<std::unique_ptr<Snapshot>> TakeSnapshot(uint64_t index, uint64_t term) override;
@@ -52,8 +60,7 @@ class KvStateMachine final : public StateMachine {
   uint64_t LastAppliedIndex() const override;
   Status Scan(std::string_view start, std::string_view end, size_t limit,
               const std::function<Status(std::string_view, std::string_view)>& fn) const override;
-  RangeVerdict CheckRange(std::string_view start, std::string_view end,
-                          bool write) const override;
+  RangeVerdict CheckRange(std::string_view start, std::string_view end, bool write) const override;
   std::optional<proto::LockRecord> FindBlockingLock(std::string_view start,
                                                     std::string_view end) const override;
   RangeVerdict CheckSpan(std::string_view start, std::string_view end) const override;
@@ -70,7 +77,7 @@ class KvStateMachine final : public StateMachine {
   Result<std::optional<proto::SessionEntry>> LookupSession(const std::string& client_id) const;
 
  private:
-  explicit KvStateMachine(std::unique_ptr<lsm::DB> db);
+  explicit KvStateMachine(std::unique_ptr<engine::Engine> db);
 
   static std::string UserKey(std::string_view key);
   static std::string SessionKey(std::string_view client_id);
@@ -85,14 +92,14 @@ class KvStateMachine final : public StateMachine {
   Result<std::optional<proto::LockRecord>> GetLock(std::string_view key) const;
   // The first lock that blocks a plain write to any key `command` touches.
   ApplyResult CheckWriteLocks(const proto::Command& command, bool* blocked) const;
-  ApplyResult PrepareTxn(const proto::TxnCmd& cmd, lsm::WriteBatch* batch);
+  ApplyResult PrepareTxn(const proto::TxnCmd& cmd, engine::Batch* batch);
 
   // Judges one key against the owned and fenced ranges. Caller holds mutex_.
   RangeVerdict JudgeKey(std::string_view key, bool write) const;
   // The strictest verdict over every key a command touches.
   RangeVerdict JudgeCommand(const proto::Command& command) const;
   // Applies a RangeCmd to `next`, filling `batch` with the persisted result.
-  ApplyResult PrepareRange(const proto::RangeCmd& cmd, lsm::WriteBatch* batch);
+  ApplyResult PrepareRange(const proto::RangeCmd& cmd, engine::Batch* batch);
 
   // Records that `index` has been consumed without changing any user data, and
   // returns `result` unchanged unless that write itself fails. Caller holds
@@ -100,9 +107,9 @@ class KvStateMachine final : public StateMachine {
   ApplyResult AdvanceOnly(uint64_t index, ApplyResult result);
 
   // Executes the operation and fills `batch`; does not commit.
-  ApplyResult Prepare(const proto::Command& command, lsm::WriteBatch* batch);
+  ApplyResult Prepare(const proto::Command& command, engine::Batch* batch);
 
-  std::unique_ptr<lsm::DB> db_;
+  std::unique_ptr<engine::Engine> db_;
 
   // Apply() is single-threaded by contract -- one Ready loop per Raft group
   // drives it -- but Get() and LastAppliedIndex() are served from gRPC handler

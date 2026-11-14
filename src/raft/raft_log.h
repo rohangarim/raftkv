@@ -16,7 +16,7 @@
 #include <span>
 #include <vector>
 
-#include "lsm/status.h"
+#include "minilsm/status.h"
 #include "raft.pb.h"
 
 namespace raftkv::raft {

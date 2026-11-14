@@ -32,8 +32,8 @@
 #include <string_view>
 #include <vector>
 
-#include "lsm/file.h"
-#include "lsm/status.h"
+#include "minilsm/file.h"
+#include "minilsm/status.h"
 
 namespace raftkv::lsm {
 

@@ -4,7 +4,7 @@
 #include <set>
 #include <utility>
 
-#include "lsm/coding.h"
+#include "minilsm/coding.h"
 
 namespace raftkv::shard {
 namespace {
@@ -50,9 +50,9 @@ Result<ShardMap> ShardMap::Create(std::vector<ShardRange> ranges, uint64_t epoch
 size_t ShardMap::IndexOf(std::string_view key) const {
   // Last range whose start is <= key. The first range starts at "", so one
   // always exists.
-  auto it = std::upper_bound(
-      ranges_.begin(), ranges_.end(), key,
-      [](std::string_view k, const ShardRange& range) { return k < range.start; });
+  auto it =
+      std::upper_bound(ranges_.begin(), ranges_.end(), key,
+                       [](std::string_view k, const ShardRange& range) { return k < range.start; });
   return static_cast<size_t>(it - ranges_.begin()) - 1;
 }
 

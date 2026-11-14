@@ -19,7 +19,7 @@
 #include <string>
 #include <string_view>
 
-#include "lsm/internal_key.h"
+#include "minilsm/internal_key.h"
 
 namespace raftkv::lsm {
 

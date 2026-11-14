@@ -19,7 +19,7 @@
 #include <string>
 #include <string_view>
 
-#include "lsm/coding.h"
+#include "minilsm/coding.h"
 
 namespace raftkv::lsm {
 

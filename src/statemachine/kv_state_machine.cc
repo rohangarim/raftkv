@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <utility>
 
-#include "lsm/coding.h"
+#include "minilsm/coding.h"
 
 #include "common/log.h"
 
@@ -128,7 +128,7 @@ proto::CommandResult CacheableResult(const ApplyResult& result) {
 
 }  // namespace
 
-KvStateMachine::KvStateMachine(std::unique_ptr<lsm::DB> db) : db_(std::move(db)) {}
+KvStateMachine::KvStateMachine(std::unique_ptr<engine::Engine> db) : db_(std::move(db)) {}
 
 std::string KvStateMachine::UserKey(std::string_view key) {
   std::string out(1, kUserPrefix);
@@ -148,8 +148,17 @@ std::string KvStateMachine::MetaKey(std::string_view name) {
   return out;
 }
 
-Result<std::unique_ptr<KvStateMachine>> KvStateMachine::Open(lsm::Options options) {
-  auto opened = lsm::DB::Open(std::move(options));
+Result<std::unique_ptr<KvStateMachine>> KvStateMachine::Open(const lsm::Options& options) {
+  engine::Options neutral;
+  neutral.dir = options.dir;
+  neutral.memtable_bytes = options.memtable_bytes;
+  neutral.l0_compaction_trigger = static_cast<int>(options.l0_compaction_trigger);
+  neutral.sync_on_write = options.sync_on_write;
+  return Open(neutral);
+}
+
+Result<std::unique_ptr<KvStateMachine>> KvStateMachine::Open(const engine::Options& options) {
+  auto opened = engine::Open(options);
   if (!opened.IsOk()) {
     return opened.GetStatus();
   }
@@ -344,7 +353,8 @@ RangeVerdict KvStateMachine::CheckSpan(std::string_view start, std::string_view 
 RangeVerdict KvStateMachine::JudgeCommand(const proto::Command& command) const {
   RangeVerdict worst = RangeVerdict::kOk;
   auto fold = [&worst](RangeVerdict v) {
-    if (v == RangeVerdict::kWrongShard || (v == RangeVerdict::kMoving && worst == RangeVerdict::kOk)) {
+    if (v == RangeVerdict::kWrongShard ||
+        (v == RangeVerdict::kMoving && worst == RangeVerdict::kOk)) {
       worst = v;
     }
   };
@@ -394,7 +404,7 @@ ApplyResult KvStateMachine::CheckWriteLocks(const proto::Command& command, bool*
       for (const auto& c : command.batch().checks()) keys.push_back(c.key());
       for (const auto& op : command.batch().ops()) {
         keys.push_back(op.op_case() == proto::BatchOp::kPut ? std::string_view(op.put().key())
-                                                           : std::string_view(op.delete_().key()));
+                                                            : std::string_view(op.delete_().key()));
       }
       break;
     default:
@@ -418,7 +428,7 @@ ApplyResult KvStateMachine::CheckWriteLocks(const proto::Command& command, bool*
   return result;
 }
 
-ApplyResult KvStateMachine::PrepareTxn(const proto::TxnCmd& cmd, lsm::WriteBatch* batch) {
+ApplyResult KvStateMachine::PrepareTxn(const proto::TxnCmd& cmd, engine::Batch* batch) {
   ApplyResult result;
   result.status = Status::Ok();
   const std::string& txid = cmd.txid();
@@ -473,8 +483,9 @@ ApplyResult KvStateMachine::PrepareTxn(const proto::TxnCmd& cmd, lsm::WriteBatch
             return result;
           }
           const std::optional<std::string>& observed = *current;
-          const bool holds = w.expected_absent() ? !observed.has_value()
-                                               : (observed.has_value() && observed.value() == w.expected());
+          const bool holds = w.expected_absent()
+                                 ? !observed.has_value()
+                                 : (observed.has_value() && observed.value() == w.expected());
           if (!holds) {
             result.txn = TxnOutcome::kValidationFailed;
             result.failed_check = static_cast<uint32_t>(i);
@@ -564,7 +575,7 @@ ApplyResult KvStateMachine::PrepareTxn(const proto::TxnCmd& cmd, lsm::WriteBatch
   return result;
 }
 
-ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, lsm::WriteBatch* batch) {
+ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, engine::Batch* batch) {
   ApplyResult result;
   if (cmd.epoch() < range_.epoch()) {
     result.status = Status::InvalidArgument("stale shard epoch " + std::to_string(cmd.epoch()) +
@@ -641,7 +652,8 @@ ApplyResult KvStateMachine::PrepareRange(const proto::RangeCmd& cmd, lsm::WriteB
         return Status::Ok();
       });
       if (has_lock) {
-        result.status = Status::Unavailable("range has transactions in flight; retry after they settle");
+        result.status =
+            Status::Unavailable("range has transactions in flight; retry after they settle");
         return result;
       }
     }
@@ -702,7 +714,7 @@ Result<std::optional<proto::SessionEntry>> KvStateMachine::LookupSession(
   return std::optional<proto::SessionEntry>{std::move(entry)};
 }
 
-ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBatch* batch) {
+ApplyResult KvStateMachine::Prepare(const proto::Command& command, engine::Batch* batch) {
   ApplyResult result;
   pending_lock_delta_ = 0;
 
@@ -824,7 +836,7 @@ ApplyResult KvStateMachine::Prepare(const proto::Command& command, lsm::WriteBat
 }
 
 ApplyResult KvStateMachine::AdvanceOnly(uint64_t index, ApplyResult result) {
-  lsm::WriteBatch batch;
+  engine::Batch batch;
   std::string encoded_index;
   lsm::PutFixed64(&encoded_index, index);
   batch.Put(MetaKey(kAppliedIndexKey), encoded_index);
@@ -858,7 +870,7 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
     // the same bytes and rejects them identically, so this is deterministic --
     // and refusing to advance would wedge the log on a poison entry forever.
     result.status = Status::InvalidArgument("command failed to parse");
-    lsm::WriteBatch batch;
+    engine::Batch batch;
     std::string encoded_index;
     lsm::PutFixed64(&encoded_index, index);
     batch.Put(MetaKey(kAppliedIndexKey), encoded_index);
@@ -910,7 +922,7 @@ ApplyResult KvStateMachine::Apply(uint64_t index, std::span<const std::byte> com
     }
   }
 
-  lsm::WriteBatch batch;
+  engine::Batch batch;
   result = Prepare(parsed, &batch);
 
   // The effect, the session entry, and the applied index all go into this one
@@ -1046,7 +1058,7 @@ Status KvStateMachine::RestoreSnapshot(Snapshot& snapshot) {
   // copied.
   RAFTKV_RETURN_IF_ERROR(db_->DestroyContents());
 
-  lsm::WriteBatch batch;
+  engine::Batch batch;
   size_t batched = 0;
   while (!input.empty()) {
     std::string_view key;
@@ -1069,7 +1081,7 @@ Status KvStateMachine::RestoreSnapshot(Snapshot& snapshot) {
   // write it explicitly too: a snapshot taken at index 0 of an empty machine
   // has no such key, and the in-memory value must still be correct.
   {
-    lsm::WriteBatch meta;
+    engine::Batch meta;
     std::string encoded;
     lsm::PutFixed64(&encoded, header.last_included_index());
     meta.Put(MetaKey(kAppliedIndexKey), encoded);

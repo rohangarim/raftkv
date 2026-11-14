@@ -2,8 +2,9 @@
 
 #include <random>
 
+#include "minilsm/coding.h"
+
 #include "common/log.h"
-#include "lsm/coding.h"
 
 namespace raftkv::client {
 namespace {
@@ -19,7 +20,8 @@ uint64_t ReadU64(std::string_view v) {
   return static_cast<uint64_t>(ReadU32(v)) | static_cast<uint64_t>(ReadU32(v.substr(4))) << 32;
 }
 
-const char* const kPhases[] = {"started", "fenced", "copied", "published", "released", "activated", "done"};
+const char* const kPhases[] = {"started",  "fenced",    "copied", "published",
+                               "released", "activated", "done"};
 constexpr size_t kPhaseCount = sizeof(kPhases) / sizeof(kPhases[0]);
 
 size_t PhaseIndex(const std::string& phase) {

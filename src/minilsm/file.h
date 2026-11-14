@@ -14,7 +14,7 @@
 #include <string>
 #include <string_view>
 
-#include "lsm/status.h"
+#include "minilsm/status.h"
 
 namespace raftkv::lsm {
 

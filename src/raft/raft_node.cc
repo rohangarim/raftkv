@@ -693,7 +693,8 @@ void RaftNode::SendAppend(uint64_t peer) {
   // snapshot can bring it up to date.
   if (p.next_index < log_.FirstIndex()) {
     PeerProgress& mp = progress_[peer];
-    if (mp.snapshot_sent_tick != 0 && ticks_ - mp.snapshot_sent_tick < config_.snapshot_resend_tick) {
+    if (mp.snapshot_sent_tick != 0 &&
+        ticks_ - mp.snapshot_sent_tick < config_.snapshot_resend_tick) {
       return;
     }
     mp.snapshot_sent_tick = ticks_;

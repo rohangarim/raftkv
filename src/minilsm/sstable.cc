@@ -1,10 +1,10 @@
-#include "lsm/sstable.h"
+#include "minilsm/sstable.h"
 
 #include <algorithm>
 #include <utility>
 
-#include "lsm/coding.h"
-#include "lsm/crc32c.h"
+#include "minilsm/coding.h"
+#include "minilsm/crc32c.h"
 
 namespace raftkv::lsm {
 namespace {

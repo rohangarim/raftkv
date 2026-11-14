@@ -42,9 +42,9 @@
 #include <utility>
 #include <vector>
 
-#include "lsm/file.h"
-#include "lsm/internal_key.h"
-#include "lsm/status.h"
+#include "minilsm/file.h"
+#include "minilsm/internal_key.h"
+#include "minilsm/status.h"
 
 namespace raftkv::lsm {
 

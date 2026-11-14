@@ -351,7 +351,9 @@ Result<std::optional<std::string>> Transaction::Get(const std::string& key) {
   return *got;
 }
 
-void Transaction::Put(const std::string& key, std::string value) { writes_[key] = std::move(value); }
+void Transaction::Put(const std::string& key, std::string value) {
+  writes_[key] = std::move(value);
+}
 
 void Transaction::Delete(const std::string& key) { writes_[key] = std::nullopt; }
 

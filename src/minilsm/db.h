@@ -42,11 +42,11 @@
 #include <string_view>
 #include <vector>
 
-#include "lsm/memtable.h"
-#include "lsm/sstable.h"
-#include "lsm/status.h"
-#include "lsm/wal.h"
-#include "lsm/write_batch.h"
+#include "minilsm/memtable.h"
+#include "minilsm/sstable.h"
+#include "minilsm/status.h"
+#include "minilsm/wal.h"
+#include "minilsm/write_batch.h"
 
 namespace raftkv::lsm {
 

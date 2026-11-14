@@ -271,7 +271,8 @@ grpc::Status KvGrpcService::Txn(grpc::ServerContext* ctx, const proto::TxnReques
   return Mutate(ctx, command, response);
 }
 
-grpc::Status KvGrpcService::TxnStatus(grpc::ServerContext* ctx, const proto::TxnStatusRequest* request,
+grpc::Status KvGrpcService::TxnStatus(grpc::ServerContext* ctx,
+                                      const proto::TxnStatusRequest* request,
                                       proto::KvResponse* response) {
   if (driver_ == nullptr) {
     response->set_code(proto::KvResponse::UNAVAILABLE);

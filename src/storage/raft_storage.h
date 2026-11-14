@@ -44,8 +44,8 @@
 #include <string>
 #include <vector>
 
-#include "lsm/file.h"
-#include "lsm/status.h"
+#include "minilsm/file.h"
+#include "minilsm/status.h"
 #include "raft.pb.h"
 
 namespace raftkv::storage {
