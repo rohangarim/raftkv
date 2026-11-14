@@ -16,7 +16,8 @@ Result<std::optional<SplitPlan>> ShardBalancer::Plan() {
   if (!loaded->has_value()) {
     return std::optional<SplitPlan>{};
   }
-  const shard::ShardMap& map = **loaded;
+  const std::optional<shard::ShardMap>& stored = *loaded;
+  const shard::ShardMap& map = stored.value();
 
   for (size_t i = 0; i < map.Ranges().size(); ++i) {
     const shard::ShardRange& range = map.Ranges()[i];
@@ -62,6 +63,7 @@ Result<bool> ShardBalancer::RunOnce(const Provision& provision) {
   if (!plan->has_value()) {
     return false;
   }
+  const SplitPlan chosen = plan->value();
 
   auto addresses = provision();
   if (!addresses.IsOk()) {
@@ -75,8 +77,9 @@ Result<bool> ShardBalancer::RunOnce(const Provision& provision) {
   if (!loaded->has_value()) {
     return Status::Unavailable("the shard map disappeared while planning a split");
   }
+  const shard::ShardMap& current = loaded->value();
   uint32_t next_id = 0;
-  for (const auto& r : (*loaded)->Ranges()) {
+  for (const auto& r : current.Ranges()) {
     next_id = std::max(next_id, r.shard_id);
   }
   ++next_id;
@@ -84,11 +87,10 @@ Result<bool> ShardBalancer::RunOnce(const Provision& provision) {
   SplitRequest request;
   // The epoch in the id keeps a later split of the same shard from being
   // mistaken for the progress record of this one.
-  request.id = "auto-" + std::to_string((*loaded)->Epoch()) + "-" +
-               std::to_string((*plan)->source_shard);
-  request.source_shard = (*plan)->source_shard;
-  request.split_key = (*plan)->split_key;
-  request.target = {next_id, (*plan)->split_key, *addresses};
+  request.id = "auto-" + std::to_string(current.Epoch()) + "-" + std::to_string(chosen.source_shard);
+  request.source_shard = chosen.source_shard;
+  request.split_key = chosen.split_key;
+  request.target = {next_id, chosen.split_key, *addresses};
 
   ShardSplitter splitter(directory_, admin_);
   const Status s = splitter.Split(request);

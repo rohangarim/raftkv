@@ -27,6 +27,7 @@ class ShardBalancerTest : public GrpcClusterFixture {
  protected:
   std::vector<std::string> AddressesOf(const std::vector<uint64_t>& ids) const {
     std::vector<std::string> out;
+    out.reserve(ids.size());
     for (uint64_t id : ids) out.push_back(nodes_.at(id).address);
     return out;
   }
