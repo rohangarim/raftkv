@@ -1,0 +1,61 @@
+# A/B: effect of group commit (proposals append under the lock, fsync outside it)
+# recorded: 2026-11-14T05:34:55Z
+# base = git 89fb925; new = same + group commit in RaftDriver
+# machine: Apple M4; load before: 2.70 2.17 2.15
+# each round: raftkv_bench --workloads put,batch --threads 1,4,16 --seconds 4 --repeat 1; runs alternate base/new
+
+## round 1: base
+put (1 key/request)      1 thr          90 ops/s    (min 90, max 90, spread  0.0%)  p50   11.04  p95   12.82  p99   17.02 ms
+put (1 key/request)      4 thr          99 ops/s    (min 99, max 99, spread  0.0%)  p50   39.71  p95   59.28  p99   67.12 ms
+put (1 key/request)     16 thr         141 ops/s    (min 141, max 141, spread  0.0%)  p50  113.06  p95  172.59  p99  186.65 ms
+batch write              1 thr        8691 keys/s   (min 8691, max 8691, spread  0.0%)  p50   11.06  p95   15.19  p99   17.02 ms
+batch write              4 thr        9574 keys/s   (min 9574, max 9574, spread  0.0%)  p50   40.69  p95   61.36  p99   82.11 ms
+
+## round 1: new
+put (1 key/request)      1 thr          88 ops/s    (min 88, max 88, spread  0.0%)  p50   11.06  p95   13.03  p99   16.15 ms
+put (1 key/request)      4 thr         117 ops/s    (min 117, max 117, spread  0.0%)  p50   33.13  p95   52.13  p99   58.77 ms
+put (1 key/request)     16 thr         312 ops/s    (min 312, max 312, spread  0.0%)  p50   53.06  p95   81.59  p99   95.88 ms
+batch write              1 thr        8767 keys/s   (min 8767, max 8767, spread  0.0%)  p50   10.97  p95   15.14  p99   19.02 ms
+batch write              4 thr       10923 keys/s   (min 10923, max 10923, spread  0.0%)  p50   35.47  p95   56.03  p99   66.01 ms
+
+## round 2: base
+put (1 key/request)      1 thr          89 ops/s    (min 89, max 89, spread  0.0%)  p50   11.19  p95   14.03  p99   20.53 ms
+put (1 key/request)      4 thr          99 ops/s    (min 99, max 99, spread  0.0%)  p50   39.77  p95   59.67  p99   69.65 ms
+put (1 key/request)     16 thr         146 ops/s    (min 146, max 146, spread  0.0%)  p50  112.95  p95  165.45  p99  182.92 ms
+batch write              1 thr        8324 keys/s   (min 8324, max 8324, spread  0.0%)  p50   11.78  p95   16.06  p99   19.66 ms
+batch write              4 thr        9148 keys/s   (min 9148, max 9148, spread  0.0%)  p50   43.36  p95   64.29  p99   81.11 ms
+
+## round 2: new
+put (1 key/request)      1 thr          85 ops/s    (min 85, max 85, spread  0.0%)  p50   11.93  p95   13.29  p99   17.84 ms
+put (1 key/request)      4 thr         114 ops/s    (min 114, max 114, spread  0.0%)  p50   35.09  p95   50.82  p99   59.19 ms
+put (1 key/request)     16 thr         303 ops/s    (min 303, max 303, spread  0.0%)  p50   51.60  p95   82.98  p99   98.97 ms
+batch write              1 thr        8248 keys/s   (min 8248, max 8248, spread  0.0%)  p50   11.71  p95   16.03  p99   18.83 ms
+batch write              4 thr       10764 keys/s   (min 10764, max 10764, spread  0.0%)  p50   36.54  p95   58.73  p99   67.74 ms
+
+## round 3: base
+put (1 key/request)      1 thr          87 ops/s    (min 87, max 87, spread  0.0%)  p50   11.84  p95   13.22  p99   18.13 ms
+put (1 key/request)      4 thr          97 ops/s    (min 97, max 97, spread  0.0%)  p50   41.98  p95   56.25  p99   63.79 ms
+put (1 key/request)     16 thr         140 ops/s    (min 140, max 140, spread  0.0%)  p50  113.55  p95  178.40  p99  196.25 ms
+batch write              1 thr        8274 keys/s   (min 8274, max 8274, spread  0.0%)  p50   11.74  p95   16.12  p99   21.83 ms
+batch write              4 thr        9563 keys/s   (min 9563, max 9563, spread  0.0%)  p50   40.24  p95   63.00  p99   78.08 ms
+
+## round 3: new
+put (1 key/request)      1 thr          85 ops/s    (min 85, max 85, spread  0.0%)  p50   11.92  p95   13.27  p99   16.29 ms
+put (1 key/request)      4 thr         120 ops/s    (min 120, max 120, spread  0.0%)  p50   32.78  p95   52.95  p99   65.79 ms
+put (1 key/request)     16 thr         306 ops/s    (min 306, max 306, spread  0.0%)  p50   51.52  p95   86.50  p99   97.13 ms
+batch write              1 thr        8115 keys/s   (min 8115, max 8115, spread  0.0%)  p50   11.87  p95   15.97  p99   23.27 ms
+batch write              4 thr       10545 keys/s   (min 10545, max 10545, spread  0.0%)  p50   37.93  p95   58.53  p99   66.56 ms
+
+## round 4: base
+put (1 key/request)      1 thr          83 ops/s    (min 83, max 83, spread  0.0%)  p50   12.02  p95   13.44  p99   15.83 ms
+put (1 key/request)      4 thr          76 ops/s    (min 76, max 76, spread  0.0%)  p50   47.66  p95   92.61  p99  213.46 ms
+put (1 key/request)     16 thr         134 ops/s    (min 134, max 134, spread  0.0%)  p50  120.93  p95  181.48  p99  219.37 ms
+batch write              1 thr        7096 keys/s   (min 7096, max 7096, spread  0.0%)  p50   12.57  p95   26.00  p99   37.08 ms
+batch write              4 thr        8240 keys/s   (min 8240, max 8240, spread  0.0%)  p50   46.67  p95   73.14  p99   88.60 ms
+
+## round 4: new
+put (1 key/request)      1 thr          84 ops/s    (min 84, max 84, spread  0.0%)  p50   11.96  p95   13.33  p99   18.52 ms
+put (1 key/request)      4 thr         120 ops/s    (min 120, max 120, spread  0.0%)  p50   31.93  p95   52.34  p99   60.95 ms
+put (1 key/request)     16 thr         327 ops/s    (min 327, max 327, spread  0.0%)  p50   45.72  p95   87.08  p99  103.30 ms
+batch write              1 thr        8248 keys/s   (min 8248, max 8248, spread  0.0%)  p50   11.66  p95   15.79  p99   19.12 ms
+batch write              4 thr        9871 keys/s   (min 9871, max 9871, spread  0.0%)  p50   38.50  p95   67.23  p99  102.70 ms

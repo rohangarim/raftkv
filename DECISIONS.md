@@ -1379,3 +1379,39 @@ as a flake but have not found its cause.
 **What it does not fix:** writes are still one fsync pair each and still do not
 scale with concurrent writers (87 to 145 ops/s from 1 to 16 threads). Group commit
 is the next lever.
+
+---
+
+## D-0054: Group commit: proposals no longer fsync under the driver lock
+
+**Phase:** 6 (follow-up to D-0053).
+
+**What:** `ProposeAndWait` and `Propose` now append to the in-memory log under
+`mutex_` and then call `FlushProposals`. The first caller takes the pending
+`Ready`, sets `persisting_`, releases `mutex_` for the log append and fsync, and
+re-takes it to `Advance`. Writers that arrive during the fsync append their
+entries and wait; the next flush syncs all of them in one call.
+
+**Why it is safe to release the lock:** the only thing another thread can do to
+the node during an unlocked persist is *append* (a leader's `Propose`), which
+cannot invalidate entries already handed out. Everything that could truncate or
+reorder the log (any `Step`, `Tick`, `ReadIndex`, snapshot compaction) first waits
+for `persisting_` to clear, so a follower cannot drop entries that are mid-write.
+`Advance` marks stable by the index of the last entry *in that Ready*, so entries
+appended during the sync are simply picked up by the next one. Messages and
+committed entries in a Ready are copied before the unlock and handed out only
+after the sync, so nothing is acknowledged or applied before it is durable.
+
+**Measured:** alternating A/B, 4 rounds (`results/52`), medians: 16 writers 140 to
+309 ops/s (p50 113 to 52 ms), 4 writers 98 to 118, 1 writer unchanged (88 to 85,
+within run spread). 100-key batches at 4 threads 9.4K to 10.7K keys/s.
+
+**Tests:** a new driver test (16 threads, 160 writes, single node) requires every
+write applied exactly once and at least 15% fewer syncs than writes; with the
+unlock removed it fails (158 syncs for 160 writes). The full suite passes under
+ASan, UBSan and TSan (`results/53`).
+
+**What it does not do:** followers still sync once per AppendEntries, replication
+is not pipelined beyond the per-peer cap, and closed-loop writers drift out of
+step so the average batch is far below the thread count. Throughput is about 2x at
+16 threads, not 16x.

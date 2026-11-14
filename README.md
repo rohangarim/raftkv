@@ -15,7 +15,7 @@ leader being killed with a real `SIGKILL`, and a node that falls far behind
 catches up from a snapshot instead of the log it no longer has.
 
 Performance numbers are below, each backed by raw output in `results/`; no file,
-no number. 295 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
+no number. 302 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
 timing-sensitive test failed once under load in an ASan run and passed on
 rerun; the raw output is in `results/`). The Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
 dropped, delayed and duplicated messages) checking all five safety invariants
@@ -34,20 +34,22 @@ describe the software on this machine, not a deployment.
 | Operation | Threads | Rate | p50 latency |
 |---|---:|---:|---:|
 | Write, one key per request | 1 | 87 ops/s | 11 ms |
-| Write, one key per request | 16 | 145 ops/s | 107 ms |
+| Write, one key per request | 16 | 309 ops/s | 52 ms |
 | Write, 100 keys per batch | 1 | 8.4K keys/s | 12 ms |
 | Linearizable read | 1 / 4 | 6.0K / 11.3K ops/s | 0.17 / 0.35 ms |
 | Scan, 100 rows | 1 | 29K rows/s | 3.4 ms |
 | Transfer, both accounts on one shard | 1 | 80 txn/s | 12 ms |
 | Transfer, accounts on two shards | 1 | 20 txn/s | 50 ms |
 
-**Writes are bound by fsync, and don't scale with more writers.** On macOS the log
-syncs with `F_FULLFSYNC`, the only call that really flushes the drive cache; it
-costs about 4 ms here, and a replicated write pays it on the leader and again on a
-follower before it can be acknowledged. More threads add queueing, not
-throughput (87 to 145 ops/s from 1 to 16), because each write still gets its own
-fsync. Batching is the lever that works: 100 keys in one entry is roughly 100x
-the key rate. Group commit would help concurrent writers; it isn't built.
+**Writes are bound by fsync.** On macOS the log syncs with `F_FULLFSYNC`, the
+only call that really flushes the drive cache; it costs about 4 ms here, and a
+replicated write pays it on the leader and again on a follower before it can be
+acknowledged. A single writer can't beat that. Concurrent writers share syncs
+(group commit): 16 threads went from 140 to 309 ops/s, while 1 thread stayed at
+about 85 ([`results/52`](results/52_raftkv_bench_ab_group_commit.txt), median of
+4 alternating runs against the previous build). It's still far from linear in
+threads. Batching many keys into one entry remains the bigger lever: 100 keys in
+one entry is roughly 100x the key rate.
 
 **One change made this about twice as fast.** The commit index used to be saved
 on every advance, a temp-file write plus a full fsync plus a rename plus a
@@ -137,9 +139,9 @@ alternative and cost.
 
 - **The real-process test is one kill, not a campaign.** No network partitions
   (needs Docker `tc`/`iptables`), no repeated runs, no linearizability checker.
-- **Concurrent writers don't scale, and can starve heartbeats.** The driver holds its lock
-  across each fsync, so under load a leader can lose leadership. Group commit
-  is the fix.
+- **Concurrent writers scale only about 2x.** Group commit shares the leader's
+  sync, but followers still sync once per append and replication isn't pipelined
+  beyond a per-peer cap.
 - **Snapshots are sent whole**, in one message. Fine for megabytes, wrong for
   gigabytes.
 - **Reads cost a quorum round trip.** No lease reads.

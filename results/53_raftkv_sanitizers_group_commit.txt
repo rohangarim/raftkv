@@ -1,0 +1,12 @@
+# raftkv sanitizer status after group commit
+# recorded: 2026-11-14T05:58:53Z
+# git base: 89fb925 plus the uncommitted group-commit change
+# command: ./scripts/ci.sh asan ubsan tsan
+
+== preset: asan
+100% tests passed out of 296
+== preset: ubsan
+100% tests passed out of 296
+== preset: tsan
+100% tests passed out of 296
+# done
