@@ -1493,3 +1493,53 @@ non-linearizable the process campaign fails 3 of 3.
 **Limits:** `SIGKILL` and cut TCP relays on one machine. The page cache survives
 a process kill, so this does not test power loss; there is no latency, reorder or
 asymmetric-loss modelling.
+
+---
+
+## D-0057: An unbounded scan was judged as a lookup of the empty key
+
+**Phase:** 6 (found while testing the balancer).
+
+**What was wrong:** `CheckRange` and `FindBlockingLock` read `start == end` as "a
+single key". A scan of the whole key space is `start = ""`, `end = ""` (unbounded),
+so it was judged as a lookup of the key `""`: owned, no lock in the way. A shard
+that had just given away the top of its range therefore answered an unbounded
+scan with only the keys it still held, returned no error and no "more" flag, and a
+client holding the pre-split map accepted that as the whole answer. In the test,
+160 keys came back as 75. The same ambiguity meant an unbounded scan skipped the
+transaction-lock check entirely, so it could read past a lock it should have
+waited on or resolved.
+
+**Fix:** `CheckSpan` and `FindBlockingLockInSpan` always treat their arguments
+as a range; `LinearizableScan` uses them. The point forms keep their meaning.
+Unit tests pin both cases; the balancer test, which reads through a client with a
+stale map right after a split, failed with 75 of 160 before the change.
+
+**Why earlier tests missed it:** the existing split tests do a `Get` first, which
+refreshes the client's map, and only then scan.
+
+---
+
+## D-0058: A key-count balancer on top of the splitter
+
+**Phase:** 6.
+
+**What:** `ShardBalancer::Plan` scans each shard's range (linearizable pages, up
+to `max_keys_per_shard + 1` keys) and, for the first shard over the limit, picks the
+median counted key; `RunOnce` takes a spare group's addresses from a callback and
+runs the existing `ShardSplitter` with an id derived from the map epoch.
+
+**Why so simple:** the hard parts (fence, copy, publish, release, activate, purge,
+and resuming after a crash) already exist. The open question was only *when* and
+*where*, and a key count with a median cut answers both well enough to show the
+mechanism end to end.
+
+**Tested:** a shard under the limit is left alone and no spare group is consumed;
+an oversized shard is split at its median with all 160 keys intact and in order,
+and a second pass does nothing; writes issued during the split are all
+acknowledged and all present afterwards.
+
+**Not done:** it is not scheduled; it counts keys, not bytes or request load; it
+holds one shard's keys in memory while planning (`max_keys_per_shard` bounds
+that); it never merges shards; and a skewed key distribution can make the median of a
+*prefix* of the shard a poor split point if the count stops early.

@@ -1,0 +1,12 @@
+# raftkv sanitizer status after the truncation fix, scan fix, balancer and chaos tests
+# recorded: 2026-11-14T09:25:36Z  git: 6c6eb30
+# command: ./scripts/ci.sh asan ubsan tsan
+# note: an earlier gate on this tree failed TxnTest.ASingleShardTransactionUsesNoTwoPhaseCommit once under ASan (22 s); it passed 3 of 3 alone and in this run. Not root-caused; same load-sensitive pattern as before.
+
+== preset: asan
+100% tests passed out of 318
+== preset: ubsan
+100% tests passed out of 318
+== preset: tsan
+100% tests passed out of 318
+# done

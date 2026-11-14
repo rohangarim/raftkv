@@ -15,7 +15,7 @@ leader being killed with a real `SIGKILL`, and a node that falls far behind
 catches up from a snapshot instead of the log it no longer has.
 
 Performance numbers are below, each backed by raw output in `results/`; no file,
-no number. 320 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
+no number. 324 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
 timing-sensitive test failed once under load in an ASan run and passed on
 rerun; the raw output is in `results/`). The Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
 dropped, delayed and duplicated messages) checking all five safety invariants
@@ -174,12 +174,15 @@ a retry after a lost reply is too rare in this setup for 1,100 operations to hit
 - **Snapshots are sent whole**, in one message. Fine for megabytes, wrong for
   gigabytes.
 - **Reads cost a quorum round trip.** No lease reads.
-- **Sharding has one coordinator and no automatic balancing.** Keys are
+- **Sharding has one coordinator and only a crude balancer.** Keys are
   range-partitioned across Raft groups, and a shard can be split live (fence,
   copy, publish a new map, hand over, purge) while the rest of the key space
-  keeps serving. Splits are resumable after a coordinator crash. But nothing
-  decides *when* to split, there's no merge, and one split at a time per shard is
-  assumed. There's no membership change, TLS or auth.
+  keeps serving. Splits are resumable after a coordinator crash. A `ShardBalancer`
+  counts keys per shard and splits the first one over a limit at its median, onto
+  a spare group you provide. It runs when called (nothing schedules it), measures
+  key count rather than bytes or load, reads a whole shard's keys to do it, and
+  never merges. One split at a time per shard is assumed. There's no membership
+  change, TLS or auth.
 - **Transactions are optimistic and key-granular.** A write spanning shards
   commits with two-phase commit and is atomic, readers never see half of one,
   and a coordinator that dies is cleaned up after by whoever meets its locks.
