@@ -159,6 +159,7 @@ void RaftDriver::Stop() {
   // Outbound RPCs were dispatched on detached threads (see DispatchOutbound);
   // wait for them to finish rather than destroying stubs_ underneath them.
   std::unique_lock<std::mutex> lock(inflight_mutex_);
+  stopped_ = true;
   inflight_drained_.wait(lock, [this] { return inflight_count_ == 0; });
 }
 
@@ -468,6 +469,12 @@ void RaftDriver::DispatchOutbound(std::vector<proto::Message> outbound) {
   for (auto& message : outbound) {
     {
       const std::lock_guard<std::mutex> lock(inflight_mutex_);
+      if (stopped_) {
+        // Stop() has drained (or is draining) the senders; starting another now
+        // would outlive the stubs it uses.
+        dropped_outbound_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
       uint32_t& to_peer = peer_inflight_[message.to()];
       if (to_peer >= options_.max_inflight_per_peer) {
         dropped_outbound_.fetch_add(1, std::memory_order_relaxed);

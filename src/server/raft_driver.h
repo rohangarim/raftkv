@@ -42,7 +42,7 @@
 
 #include <grpcpp/grpcpp.h>
 
-#include "lsm/status.h"
+#include "minilsm/status.h"
 #include "raft.grpc.pb.h"
 
 #include "raft/raft_node.h"
@@ -293,6 +293,11 @@ class RaftDriver {
   // Stop().
   std::mutex inflight_mutex_;
   uint64_t inflight_count_ = 0;
+  // Set by Stop() under inflight_mutex_. Once set, DispatchOutbound sends
+  // nothing: an inbound RPC handler can still be running after Stop() has
+  // drained, and a sender thread started then would use stubs_ while the
+  // destructor tears them down.
+  bool stopped_ = false;                                  // guarded by inflight_mutex_
   std::unordered_map<uint64_t, uint32_t> peer_inflight_;  // guarded by inflight_mutex_
   std::atomic<uint64_t> dropped_outbound_{0};
   std::condition_variable inflight_drained_;
