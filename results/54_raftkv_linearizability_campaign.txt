@@ -1,0 +1,19 @@
+# raftkv linearizability campaign: 3-node cluster, 5 clients, 5 keys, kills every few hundred ms
+# recorded: 2026-11-14T07:19:29Z  git: 47f0346 + test-only changes
+# per seed: ./build/test/linearizability_cluster_test with RAFTKV_LIN_SEED=<seed>
+# 'unknown' = operations whose outcome the client could not learn (timeouts during double faults)
+seed 1 exit=0 campaign: 1100 ops, 11 unknown, 8 node kills, 446 reads, 33 successful swaps
+seed 2 exit=0 campaign: 1100 ops, 10 unknown, 8 node kills, 448 reads, 28 successful swaps
+seed 3 exit=0 campaign: 1100 ops, 9 unknown, 8 node kills, 449 reads, 33 successful swaps
+seed 4 exit=0 campaign: 1100 ops, 10 unknown, 8 node kills, 471 reads, 48 successful swaps
+seed 5 exit=0 campaign: 1100 ops, 10 unknown, 8 node kills, 436 reads, 36 successful swaps
+seed 6 exit=0 campaign: 1100 ops, 10 unknown, 8 node kills, 436 reads, 30 successful swaps
+seed 7 exit=0 campaign: 1100 ops, 11 unknown, 8 node kills, 436 reads, 37 successful swaps
+seed 8 exit=0 campaign: 1100 ops, 8 unknown, 8 node kills, 410 reads, 29 successful swaps
+seed 9 exit=0 campaign: 1100 ops, 11 unknown, 8 node kills, 419 reads, 41 successful swaps
+seed 10 exit=0 campaign: 1100 ops, 5 unknown, 6 node kills, 452 reads, 30 successful swaps
+seed 11 exit=0 campaign: 1100 ops, 10 unknown, 8 node kills, 440 reads, 38 successful swaps
+seed 12 exit=0 campaign: 1100 ops, 10 unknown, 8 node kills, 446 reads, 31 successful swaps
+seed 13 exit=0 campaign: 1100 ops, 10 unknown, 8 node kills, 432 reads, 38 successful swaps
+seed 14 exit=0 campaign: 1100 ops, 15 unknown, 8 node kills, 438 reads, 33 successful swaps
+seed 15 exit=0 campaign: 1100 ops, 9 unknown, 8 node kills, 448 reads, 28 successful swaps

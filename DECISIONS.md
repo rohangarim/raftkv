@@ -1415,3 +1415,37 @@ ASan, UBSan and TSan (`results/53`).
 is not pipelined beyond the per-peer cap, and closed-loop writers drift out of
 step so the average batch is far below the thread count. Throughput is about 2x at
 16 threads, not 16x.
+
+---
+
+## D-0055: A linearizability checker and a kill campaign
+
+**Phase:** 10 (the checker DECISIONS earlier deferred).
+
+**What:** `test/linearizability.h` checks a history of puts, gets and
+compare-and-swaps on independent registers: per key, a depth-first search for a
+total order that respects real time, memoised on (set of placed operations,
+register value). Operations with unknown outcome (client timeout) have no return
+time, so they constrain nothing and may be placed after their start or left out.
+`linearizability_cluster_test` drives it against a real 3-node cluster with
+concurrent clients and random node kills, including double faults.
+
+**Why the checker can be trusted:** 13 unit tests cover histories it must
+reject (stale read, lost acknowledged write, reads going backwards, two
+swaps both winning, an unknown write applied twice) and accept. Separately,
+removing the read-point wait from `AwaitReadPoint` makes the campaign fail on
+every seed tried (4 of 4) with a readable counterexample.
+
+**What it did not catch:** disabling exactly-once deduplication passed all 4
+seeds tried. Duplicates need a retry after an applied-but-unacknowledged write,
+which this schedule rarely produces. That property is covered by the state
+machine and driver tests, not by this campaign.
+
+**Limits:** kills are `CrashNode` (driver stopped, server shut down, directory
+kept), not power loss or SIGKILL mid-fsync; there are no network partitions,
+clock faults or disk errors. Fifteen clean seeds (`results/54`) is evidence, not
+proof.
+
+**Found along the way:** the test fixture dereferenced a null driver when a node
+restarted while another was down. Fixed in the fixture; no production code
+changed.
