@@ -101,6 +101,15 @@ raftkv_test(raft_inflight_test
   LIBS raftkv_server raftkv_transport raftkv_statemachine
   TIMEOUT 120)
 
+raftkv_test(linearizability_test
+  SOURCES linearizability_test.cc
+  LIBS raftkv_common)
+
+raftkv_test(linearizability_cluster_test
+  SOURCES linearizability_cluster_test.cc
+  LIBS raftkv_client raftkv_server raftkv_transport raftkv_statemachine
+  TIMEOUT 240)
+
 raftkv_test(shard_map_test
   SOURCES shard_map_test.cc
   LIBS raftkv_shard)
