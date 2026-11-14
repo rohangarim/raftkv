@@ -182,6 +182,13 @@ Status RaftDriver::PersistReady(const raft::Ready& ready) {
     RAFTKV_RETURN_IF_ERROR(hard_state_->Save(*ready.hard_state));
   }
   if (!ready.entries_to_persist.empty()) {
+    // A follower that took a different leader's entries re-emits indices the
+    // durable log already holds. Cut the old suffix first, or the append
+    // would leave a hole and the node would fail every tick from then on.
+    const uint64_t first = ready.entries_to_persist.front().index();
+    if (first <= log_->LastIndex()) {
+      RAFTKV_RETURN_IF_ERROR(log_->TruncateSuffix(first));
+    }
     RAFTKV_RETURN_IF_ERROR(log_->Append(ready.entries_to_persist));
     RAFTKV_RETURN_IF_ERROR(log_->Sync());
     log_syncs_.fetch_add(1, std::memory_order_relaxed);

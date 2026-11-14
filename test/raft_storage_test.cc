@@ -387,6 +387,42 @@ TEST_F(RaftStorageTest, TruncateThenAppendReplacesTheSuffix) {
   EXPECT_EQ((*all)[1].term(), 9U);
 }
 
+// Truncating across several segments, with the cut in the middle of one and at
+// the exact start of another, must leave a log that reopens cleanly and takes
+// new entries.
+TEST_F(RaftStorageTest, TruncateAcrossSegmentsLeavesAUsableLog) {
+  for (const uint64_t cut : {uint64_t{1}, uint64_t{37}, uint64_t{50}, uint64_t{100}}) {
+    SCOPED_TRACE("cut at " + std::to_string(cut));
+    std::filesystem::remove_all(dir_);
+    std::filesystem::create_directories(dir_);
+    {
+      auto log = OpenLog(/*segment_bytes=*/512);
+      std::vector<proto::Entry> entries;
+      for (uint64_t i = 1; i <= 100; ++i) {
+        entries.push_back(MakeEntry(i, 1, std::string(64, 'v')));
+      }
+      ASSERT_TRUE(log->Append(entries).IsOk());
+      ASSERT_TRUE(log->Sync().IsOk());
+      ASSERT_GT(log->SegmentCount(), 3U);
+      ASSERT_TRUE(log->TruncateSuffix(cut).IsOk());
+      EXPECT_EQ(log->LastIndex(), cut - 1);
+      ASSERT_TRUE(log->Append(std::vector<proto::Entry>{MakeEntry(cut, 2, "new")}).IsOk());
+      ASSERT_TRUE(log->Sync().IsOk());
+    }
+    auto log = OpenLog(/*segment_bytes=*/512);
+    ASSERT_NE(log, nullptr);
+    auto all = log->ReadAll();
+    ASSERT_TRUE(all.IsOk());
+    ASSERT_EQ(all->size(), cut);
+    EXPECT_EQ(all->back().term(), 2U);
+    EXPECT_EQ(all->back().data(), "new");
+    EXPECT_EQ(all->front().index(), 1U);
+    for (size_t i = 1; i < all->size(); ++i) {
+      EXPECT_EQ((*all)[i].index(), (*all)[i - 1].index() + 1) << "hole in the log";
+    }
+  }
+}
+
 TEST_F(RaftStorageTest, CompactPrefixRemovesWholeSegmentsOnly) {
   auto log = OpenLog(/*segment_bytes=*/512);
   std::vector<proto::Entry> entries;

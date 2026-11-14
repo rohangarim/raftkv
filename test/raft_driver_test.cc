@@ -241,6 +241,70 @@ TEST_F(RaftDriverTest, ConcurrentWritesShareLogSyncs) {
       << syncs << " syncs for " << kThreads * kPerThread << " writes";
 }
 
+// A follower whose log disagrees with the leader's has to throw away its
+// divergent suffix on disk, not just in memory. Appending the leader's entries
+// after the stale ones leaves a hole in the durable log, which the storage
+// layer refuses; the node then fails every tick and never serves again. Found
+// by the process chaos test, which killed and partitioned real nodes.
+TEST_F(RaftDriverTest, ADivergentSuffixIsReplacedOnDiskAndSurvivesRestart) {
+  auto open = [&]() {
+    DriverOptions options;
+    options.raft_config.id = 1;
+    options.raft_config.peers = {1, 2, 3};
+    options.raft_config.election_tick = 1000;  // never campaigns on its own
+    options.peer_addresses = {{1, "127.0.0.1:1"}, {2, "127.0.0.1:2"}, {3, "127.0.0.1:3"}};
+    options.raft_config.random_seed = 1;
+    options.storage_dir = dir_;
+    options.tick_interval_ms = 5;
+    auto sm = std::make_shared<WatchingStateMachine>(std::chrono::microseconds(0));
+    auto opened = RaftDriver::Open(std::move(options), std::move(sm));
+    EXPECT_TRUE(opened.IsOk()) << opened.GetStatus().ToString();
+    return std::shared_ptr<RaftDriver>(opened.TakeValue().release());
+  };
+  auto append = [](RaftDriver& d, uint64_t term, uint64_t prev_index, uint64_t prev_term,
+                   const std::vector<std::pair<uint64_t, uint64_t>>& entries /* index, term */,
+                   proto::Message* response) {
+    proto::Message m;
+    m.set_type(proto::MSG_APPEND);
+    m.set_from(2);
+    m.set_to(1);
+    m.set_term(term);
+    m.set_index(prev_index);
+    m.set_log_term(prev_term);
+    for (const auto& [index, entry_term] : entries) {
+      proto::Entry* e = m.add_entries();
+      e->set_index(index);
+      e->set_term(entry_term);
+      e->set_data("x");
+    }
+    return d.HandleAppendEntries(m, response);
+  };
+
+  proto::Message reply;
+  {
+    auto d = open();
+    // Term 1: a leader sends entries 1..3.
+    ASSERT_TRUE(append(*d, 1, 0, 0, {{1, 1}, {2, 1}, {3, 1}}, &reply).IsOk());
+    ASSERT_FALSE(reply.reject());
+    // Term 2: a different leader disagrees from index 2 on.
+    const auto s = append(*d, 2, 1, 1, {{2, 2}, {3, 2}}, &reply);
+    ASSERT_TRUE(s.IsOk()) << s.ToString();
+    ASSERT_FALSE(reply.reject());
+    // And the node keeps working afterwards.
+    ASSERT_TRUE(append(*d, 2, 3, 2, {{4, 2}}, &reply).IsOk());
+    ASSERT_FALSE(reply.reject());
+    d->Stop();
+  }
+
+  // After a restart the node must hold the term-2 entries, not the old ones.
+  auto d = open();
+  ASSERT_TRUE(append(*d, 2, 4, 2, {}, &reply).IsOk());
+  EXPECT_FALSE(reply.reject()) << "the log after restart does not end with the term-2 entry at 4";
+  ASSERT_TRUE(append(*d, 2, 3, 1, {}, &reply).IsOk());
+  EXPECT_TRUE(reply.reject()) << "index 3 must be term 2, not the discarded term-1 entry";
+  d->Stop();
+}
+
 // Each committed entry is delivered once. The failure this guards against is
 // subtle: the state machine's own dedup absorbs repeats, so the only symptoms
 // are wasted work and an applied index that moves backwards.

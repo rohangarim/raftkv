@@ -309,41 +309,80 @@ Result<std::vector<proto::Entry>> RaftLogStore::ReadAll() {
 }
 
 Status RaftLogStore::TruncateSuffix(uint64_t index) {
-  if (index > last_index_) {
+  if (index > last_index_ || segments_.empty()) {
     return Status::Ok();
   }
 
-  auto entries = ReadAll();
-  if (!entries.IsOk()) {
-    return entries.GetStatus();
-  }
-
-  // Rewrite from scratch. Slower than seeking to a byte offset, and chosen
-  // deliberately: a follower repairing a divergent suffix is rare, and a
-  // rewrite cannot leave a half-updated index behind the way an in-place
-  // truncation across a segment boundary can.
-  RAFTKV_RETURN_IF_ERROR(active_->Close());
-  std::error_code ec;
-  for (const auto& segment : segments_) {
-    std::filesystem::remove(segment.path, ec);
-  }
-  segments_.clear();
-  active_.reset();
-
-  std::vector<proto::Entry> kept;
-  for (auto& entry : *entries) {
-    if (entry.index() < index) {
-      kept.push_back(std::move(entry));
+  // Every step below leaves the log as a valid prefix of what it was, so a
+  // crash at any point costs only entries the caller is about to overwrite
+  // anyway (a conflicting suffix is never committed). The first version of this
+  // function deleted every segment and rewrote the survivors, which a crash in
+  // the middle turned into total loss of an acknowledged log.
+  //
+  //   1. Delete whole segments that start at or after `index`, newest first.
+  //   2. Cut the segment that holds `index` at that entry's byte offset.
+  size_t target = 0;
+  for (size_t i = 0; i < segments_.size(); ++i) {
+    if (segments_[i].first_index <= index) {
+      target = i;
     }
   }
-
-  last_index_ = kept.empty() ? first_index_ - 1 : kept.back().index();
-  RAFTKV_RETURN_IF_ERROR(OpenActiveSegment());
-  if (!kept.empty()) {
-    last_index_ = kept.front().index() - 1;
-    RAFTKV_RETURN_IF_ERROR(Append(kept));
+  // A segment that starts exactly at `index` holds nothing we keep; drop it
+  // too, unless it is the only one (the log then simply becomes empty).
+  if (segments_[target].first_index == index && target > 0) {
+    --target;
   }
-  return Sync();
+
+  RAFTKV_RETURN_IF_ERROR(active_->Close());
+  active_.reset();
+
+  std::error_code ec;
+  while (segments_.size() > target + 1) {
+    std::filesystem::remove(segments_.back().path, ec);
+    if (ec) {
+      return Status::IoError("removing segment during truncate: " + ec.message());
+    }
+    segments_.pop_back();
+  }
+  RAFTKV_RETURN_IF_ERROR(lsm::SyncDirectory(options_.dir));
+
+  auto contents = ReadWholeFile(segments_[target].path);
+  if (!contents.IsOk()) {
+    return contents.GetStatus();
+  }
+  std::vector<std::string> payloads;
+  uint64_t good_bytes = 0;
+  RAFTKV_RETURN_IF_ERROR(ScanRecords(*contents, &payloads, &good_bytes));
+  uint64_t keep_bytes = 0;
+  uint64_t last_kept = segments_[target].first_index - 1;
+  for (const std::string& payload : payloads) {
+    proto::Entry entry;
+    if (!entry.ParseFromString(payload)) {
+      return Status::Corruption("raft log: entry failed to parse");
+    }
+    if (entry.index() >= index) {
+      break;
+    }
+    keep_bytes += kRecordHeaderSize + payload.size();
+    last_kept = entry.index();
+  }
+  if (keep_bytes < contents->size()) {
+    std::filesystem::resize_file(segments_[target].path, keep_bytes, ec);
+    if (ec) {
+      return Status::IoError("truncating log segment: " + ec.message());
+    }
+    auto reopened = lsm::WritableFile::OpenForAppend(segments_[target].path);
+    if (!reopened.IsOk()) {
+      return reopened.GetStatus();
+    }
+    auto file = reopened.TakeValue();
+    RAFTKV_RETURN_IF_ERROR(file->Sync());
+    RAFTKV_RETURN_IF_ERROR(file->Close());
+  }
+
+  last_index_ = std::max(last_kept, first_index_ - 1);
+  unsynced_entries_ = 0;
+  return OpenActiveSegment();
 }
 
 Status RaftLogStore::ResetTo(uint64_t index) {
