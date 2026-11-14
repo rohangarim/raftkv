@@ -1342,3 +1342,40 @@ catch them.
   the split fails and is retried.
 - Contended keys retry a lot: 48 racing transfers over four accounts needed 34
   retries in the test. That is correctness, not speed.
+
+---
+
+## D-0053: The commit index is no longer written to disk on every advance
+
+**Phase:** 6 (found by benchmarking).
+
+**What:** `ReadyToProcess` used to emit a hard-state write whenever term, vote *or
+commit* changed. It now writes only when term or vote change. The commit index is
+still stored whenever the hard state is written for those reasons, so the stored
+value never goes backwards.
+
+**Why it is safe:** in Raft the commit index is volatile. A restarted node
+relearns it from the leader (an AppendEntries or heartbeat carries it), and a
+stale *lower* value is always safe, because commit only ever moves forward. What
+must be durable before answering an RPC is the term and the vote (Figure 2), and
+those still are. A restarted node whose stored commit is stale re-emits a few
+entries to the state machine, which dedups by index. A restored snapshot sets the
+commit index itself.
+
+**Why it was worth it:** every replicated write caused a hard-state save on the
+leader (temp file, full fsync, rename, directory fsync) *on the path to the
+client's acknowledgement*, and another on each follower. An alternating A/B of the
+old and new binaries (`results/50`) shows one-key writes going from a median of 38
+to 72 ops/s and 100-key batches from 3.6K to 7.7K keys/s, with write p50 falling
+from about 25 ms to about 12 ms.
+
+**How I checked it, and what I did not:** the full suite passes (299 tests),
+including 2,000 randomized crash/restart/partition scenarios per run that restart
+nodes with only their persisted state. I did not model-check it, and one unrelated
+driver test timed out once in a full run that was also unusually slow overall; it
+passed 15 of 15 times alone and on a rerun of the whole suite, so I'm treating it
+as a flake but have not found its cause.
+
+**What it does not fix:** writes are still one fsync pair each and still do not
+scale with concurrent writers (87 to 145 ops/s from 1 to 16 threads). Group commit
+is the next lever.

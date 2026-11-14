@@ -1,0 +1,42 @@
+# raftkv benchmark -- baseline, before any write-path changes
+# recorded: 2026-11-14T02:46:10Z
+# git: 983b022 + the benchmark tool itself (uncommitted); the raft/ source is unchanged from 983b022
+# machine: Apple M4, 10 cores, 16 GiB, macOS 26.3.1
+# build: RelWithDebInfo
+# load before: 2.99 2.76 2.76
+# command: build/bench/raftkv_bench --seconds 4 --repeat 3
+
+# raftkv benchmark
+# 3-node Raft group(s) on 127.0.0.1, one process, real gRPC, real disk, fsync on every Raft log append
+# value=100 B, 4 s per measurement (+1 s warm-up), 3 repeats, batch=100 keys
+
+append + fsync (raw)     1 thr         246 ops/s     p50    3.99  p95    6.08  p99    8.51 ms
+
+put (1 key/request)      1 thr          44 ops/s    (min 43, max 44, spread  3.9%)  p50   22.94  p95   26.19  p99   30.35 ms
+put (1 key/request)      4 thr          72 ops/s    (min 72, max 72, spread  0.3%)  p50   55.44  p95   67.84  p99   72.92 ms
+put (1 key/request)     16 thr         114 ops/s    (min 108, max 117, spread  7.7%)  p50  125.72  p95  247.12  p99  262.85 ms
+batch write              1 thr        4419 keys/s   (min 4166, max 4439, spread  6.2%)  p50   22.95  p95   26.97  p99   30.58 ms
+batch write              4 thr        6958 keys/s   (min 6790, max 6966, spread  2.5%)  p50   57.88  p95   74.15  p99   86.25 ms
+get (linearizable)       1 thr        3330 ops/s    (min 3176, max 3891, spread 21.5% FLAG)  p50    0.30  p95    0.33  p99    0.36 ms
+get (linearizable)       4 thr        5721 ops/s    (min 5718, max 5763, spread  0.8%)  p50    0.70  p95    0.84  p99    0.91 ms
+get (linearizable)      16 thr        6742 ops/s    (min 6489, max 6784, spread  4.4%)  p50    1.12  p95    1.50  p99    1.70 ms
+scan 100 rows            1 thr       29377 rows/s   (min 27456, max 29703, spread  7.6%)  p50    3.23  p95    6.01  p99    6.27 ms
+scan 100 rows            4 thr       53371 rows/s   (min 47917, max 55195, spread 13.6%)  p50    6.89  p95   13.40  p99   14.99 ms
+transfer, one shard      1 thr          37 txn/s    (min 1, max 39, spread 102.3% FLAG)  p50   26.92  p95   34.21  p99   39.56 ms  errors=1 [first: transfer: gave up after retries or an error]
+transfer, one shard      4 thr          48 txn/s    (min 47, max 49, spread  4.4%)  p50   83.61  p95  111.39  p99  168.09 ms  conflict-retries=7
+transfer, one shard      8 thr          51 txn/s    (min 50, max 52, spread  3.9%)  p50  103.84  p95 1066.03  p99 1101.74 ms  conflict-retries=17
+transfer, cross-shard    1 thr          10 txn/s    (min 0, max 10, spread 102.2% FLAG)  p50  103.19  p95  126.09  p99  133.23 ms
+transfer, cross-shard    4 thr          12 txn/s    (min 12, max 12, spread  4.3%)  p50  365.24  p95  447.06  p99  492.71 ms
+transfer, cross-shard    8 thr          15 txn/s    (min 15, max 16, spread  4.8%)  p50  543.20  p95 1464.30  p99 1701.22 ms  conflict-retries=1
+
+# load after: 2.61 3.29 3.03
+# done
+
+# NOTES (added after the run)
+# - The two FLAG rows with min 0-1 txn/s ("transfer ... 1 thr") each had one
+#   repeat in which the transfer loop stalled for most of the 4 s window (one gave
+#   up with an error). I did not investigate; leader instability under fsync load
+#   (DECISIONS.md D-0046) is the likely cause, but that is a guess, not a finding.
+# - "append + fsync (raw)" is one thread appending 128 B and calling the same sync
+#   the Raft log uses (F_FULLFSYNC on macOS). It is the floor under one durable
+#   write; a replicated write pays it on the leader and again on a follower.

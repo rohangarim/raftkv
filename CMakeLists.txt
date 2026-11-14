@@ -38,6 +38,7 @@ endif()
 
 add_subdirectory(proto)
 add_subdirectory(src)
+add_subdirectory(bench)
 
 if(RAFTKV_BUILD_TESTS)
   enable_testing()

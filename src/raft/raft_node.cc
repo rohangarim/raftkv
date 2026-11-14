@@ -782,7 +782,13 @@ Ready RaftNode::ReadyToProcess() {
     hs.set_term(term_);
     hs.set_vote(vote_);
     hs.set_commit(commit_index_);
-    if (hs.SerializeAsString() != last_hard_state_.SerializeAsString()) {
+    // Only term and vote must be durable before answering an RPC (Figure 2).
+    // The commit index is volatile in Raft: a restarted node relearns it from
+    // the leader, and a stale lower value is always safe. Writing it on every
+    // advance cost a temp-file write, a full fsync, a rename and a directory
+    // fsync on the critical path of every replicated write, on every node. It
+    // is still stored whenever term or vote change, so it never goes backwards.
+    if (hs.term() != last_hard_state_.term() || hs.vote() != last_hard_state_.vote()) {
       ready.hard_state = hs;
     }
   }

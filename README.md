@@ -14,14 +14,58 @@ retries safely, and does linearizable reads. Acknowledged writes survive the
 leader being killed with a real `SIGKILL`, and a node that falls far behind
 catches up from a snapshot instead of the log it no longer has.
 
-There are **no performance numbers yet**, because nothing has been benchmarked.
-When numbers show up here they'll link to raw output in `results/`. No file, no
-number. 295 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
+Performance numbers are below, each backed by raw output in `results/`; no file,
+no number. 295 tests, clang-tidy clean, and green under ASan, UBSan and TSan (one
 timing-sensitive test failed once under load in an ASan run and passed on
 rerun; the raw output is in `results/`). The Raft core also runs 2000 randomized fault scenarios (partitions, crashes,
 dropped, delayed and duplicated messages) checking all five safety invariants
 after every step. See [`VERIFIED_NUMBERS.md`](VERIFIED_NUMBERS.md) for what's
 been audited and what can't be claimed yet.
+
+## Performance
+
+Measured on an Apple M4 laptop with `bench/raftkv_bench`: a 3-node Raft group
+(two groups for the transaction rows) in **one process on loopback**, real gRPC,
+real disk, 100-byte values, median of 3 repeats of 4 s
+([`results/49`](results/49_raftkv_bench_no_commit_persist.txt)). That means no
+real network between nodes and clients sharing cores with the servers, so these
+describe the software on this machine, not a deployment.
+
+| Operation | Threads | Rate | p50 latency |
+|---|---:|---:|---:|
+| Write, one key per request | 1 | 87 ops/s | 11 ms |
+| Write, one key per request | 16 | 145 ops/s | 107 ms |
+| Write, 100 keys per batch | 1 | 8.4K keys/s | 12 ms |
+| Linearizable read | 1 / 4 | 6.0K / 11.3K ops/s | 0.17 / 0.35 ms |
+| Scan, 100 rows | 1 | 29K rows/s | 3.4 ms |
+| Transfer, both accounts on one shard | 1 | 80 txn/s | 12 ms |
+| Transfer, accounts on two shards | 1 | 20 txn/s | 50 ms |
+
+**Writes are bound by fsync, and don't scale with more writers.** On macOS the log
+syncs with `F_FULLFSYNC`, the only call that really flushes the drive cache; it
+costs about 4 ms here, and a replicated write pays it on the leader and again on a
+follower before it can be acknowledged. More threads add queueing, not
+throughput (87 to 145 ops/s from 1 to 16), because each write still gets its own
+fsync. Batching is the lever that works: 100 keys in one entry is roughly 100x
+the key rate. Group commit would help concurrent writers; it isn't built.
+
+**One change made this about twice as fast.** The commit index used to be saved
+on every advance, a temp-file write plus a full fsync plus a rename plus a
+directory fsync on every node's critical path, even though Raft doesn't need it to
+be durable. Not saving it halved the write latency (A/B, alternating runs of the
+old and new binaries, 4 rounds: one-key writes 38 to 72 ops/s, 100-key batches
+3.6K to 7.7K keys/s;
+[`results/50`](results/50_raftkv_bench_ab_commit_persist.txt)). Reads and scans
+are unaffected, and the first baseline run
+([`results/48`](results/48_raftkv_bench_baseline.txt)) was noisier than the later
+ones, which is why that comparison uses alternating runs.
+
+Run it yourself:
+
+```bash
+cmake --build --preset default --target raftkv_bench
+build/bench/raftkv_bench --seconds 4 --repeat 3
+```
 
 ## Build
 
@@ -93,7 +137,7 @@ alternative and cost.
 
 - **The real-process test is one kill, not a campaign.** No network partitions
   (needs Docker `tc`/`iptables`), no repeated runs, no linearizability checker.
-- **Heavy concurrent writes starve heartbeats.** The driver holds its lock
+- **Concurrent writers don't scale, and can starve heartbeats.** The driver holds its lock
   across each fsync, so under load a leader can lose leadership. Group commit
   is the fix.
 - **Snapshots are sent whole**, in one message. Fine for megabytes, wrong for
@@ -120,4 +164,4 @@ src/storage/ durable log       src/server/      node process + driver
 src/client/  leader-aware client   test/        unit, cluster and gRPC tests
 ```
 
-`src/shard/` holds the range shard map; `src/client/` has the sharded client, the directory and the split coordinator. `bench/` and `chaos/` are planned and still empty.
+`src/shard/` holds the range shard map; `src/client/` has the sharded client, the directory and the split coordinator. `bench/` has the benchmark tool; `chaos/` is planned and still empty.
