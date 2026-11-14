@@ -65,9 +65,9 @@ Result<std::unique_ptr<RaftDriver>> RaftDriver::Open(
     return snap_opened.GetStatus();
   }
 
-  std::unique_ptr<RaftDriver> driver(
-      new RaftDriver(std::move(options), std::move(state_machine), hs_opened.TakeValue(),
-                     log_opened.TakeValue(), snap_opened.TakeValue()));
+  std::unique_ptr<RaftDriver> driver(new RaftDriver(std::move(options), std::move(state_machine),
+                                                    hs_opened.TakeValue(), log_opened.TakeValue(),
+                                                    snap_opened.TakeValue()));
   RAFTKV_RETURN_IF_ERROR(driver->Recover());
   return driver;
 }
@@ -162,12 +162,7 @@ void RaftDriver::Stop() {
   inflight_drained_.wait(lock, [this] { return inflight_count_ == 0; });
 }
 
-Status RaftDriver::DrainAndPersist(DrainedReady* out) {
-  raft::Ready ready = node_->ReadyToProcess();
-  if (ready.Empty()) {
-    return Status::Ok();
-  }
-
+Status RaftDriver::PersistReady(const raft::Ready& ready) {
   // Order matters and is the entire point of this function: everything that
   // must survive a crash is written before Advance() lets the core consider
   // it handled, and before any of it is returned to a caller who might act on
@@ -182,11 +177,6 @@ Status RaftDriver::DrainAndPersist(DrainedReady* out) {
     stored.data = ready.snapshot->data;
     RAFTKV_RETURN_IF_ERROR(snapshots_->Save(stored));
     RAFTKV_RETURN_IF_ERROR(log_->ResetTo(stored.index));
-    // Whatever was queued to apply is covered by the snapshot now.
-    while (!apply_queue_.empty() && apply_queue_.front().index() <= stored.index) {
-      apply_queue_.pop_front();
-    }
-    pending_restore_ = *ready.snapshot;
   }
   if (ready.hard_state.has_value()) {
     RAFTKV_RETURN_IF_ERROR(hard_state_->Save(*ready.hard_state));
@@ -194,8 +184,19 @@ Status RaftDriver::DrainAndPersist(DrainedReady* out) {
   if (!ready.entries_to_persist.empty()) {
     RAFTKV_RETURN_IF_ERROR(log_->Append(ready.entries_to_persist));
     RAFTKV_RETURN_IF_ERROR(log_->Sync());
+    log_syncs_.fetch_add(1, std::memory_order_relaxed);
   }
+  return Status::Ok();
+}
 
+void RaftDriver::CompleteReady(raft::Ready& ready, DrainedReady* out) {
+  if (ready.snapshot.has_value()) {
+    // Whatever was queued to apply is covered by the snapshot now.
+    while (!apply_queue_.empty() && apply_queue_.front().index() <= ready.snapshot->index) {
+      apply_queue_.pop_front();
+    }
+    pending_restore_ = *ready.snapshot;
+  }
   // Copy, do not move. Advance() below reads committed_entries.back().index() to
   // learn how far the core has handed out. A moved-from protobuf reads as index
   // 0, so moving here made the core believe it had applied nothing and re-emit
@@ -207,6 +208,39 @@ Status RaftDriver::DrainAndPersist(DrainedReady* out) {
   out->read_states = ready.read_states;
   out->dropped_reads = ready.dropped_reads;
   node_->Advance(ready);
+}
+
+Status RaftDriver::DrainAndPersist(DrainedReady* out) {
+  raft::Ready ready = node_->ReadyToProcess();
+  if (ready.Empty()) {
+    return Status::Ok();
+  }
+  RAFTKV_RETURN_IF_ERROR(PersistReady(ready));
+  CompleteReady(ready, out);
+  return Status::Ok();
+}
+
+void RaftDriver::WaitNotPersisting(std::unique_lock<std::mutex>& lock) {
+  persist_cv_.wait(lock, [this] { return !persisting_; });
+}
+
+Status RaftDriver::FlushProposals(DrainedReady* out) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  WaitNotPersisting(lock);
+  raft::Ready ready = node_->ReadyToProcess();
+  if (ready.Empty()) {
+    return Status::Ok();  // a flush that started earlier already took our entry
+  }
+  persisting_ = true;
+  lock.unlock();
+  Status s = PersistReady(ready);
+  lock.lock();
+  persisting_ = false;
+  persist_cv_.notify_all();
+  if (!s.IsOk()) {
+    return s;
+  }
+  CompleteReady(ready, out);
   return Status::Ok();
 }
 
@@ -308,7 +342,8 @@ void RaftDriver::MaybeTakeSnapshot() {
     return;
   }
 
-  const std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
+  WaitNotPersisting(lock);
   if (!node_->CompactLog(applied, std::move(data)).IsOk()) {
     return;
   }
@@ -325,6 +360,8 @@ void RaftDriver::MaybeTakeSnapshot() {
 uint64_t RaftDriver::DroppedOutbound() const {
   return dropped_outbound_.load(std::memory_order_relaxed);
 }
+
+uint64_t RaftDriver::LogSyncs() const { return log_syncs_.load(std::memory_order_relaxed); }
 
 uint64_t RaftDriver::RedeliveredEntries() const {
   return redelivered_.load(std::memory_order_relaxed);
@@ -492,7 +529,8 @@ void RaftDriver::SendOne(const proto::Message& message) {
 
   DrainedReady drained;
   {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    WaitNotPersisting(lock);
     node_->Step(response);
     const Status s = DrainAndPersist(&drained);
     if (!s.IsOk()) {
@@ -514,7 +552,8 @@ void RaftDriver::TickLoop() {
 
     DrainedReady drained;
     {
-      const std::lock_guard<std::mutex> lock(mutex_);
+      std::unique_lock<std::mutex> lock(mutex_);
+      WaitNotPersisting(lock);
       node_->Tick();
       const Status s = DrainAndPersist(&drained);
       if (!s.IsOk()) {
@@ -532,8 +571,8 @@ Status RaftDriver::Propose(std::span<const std::byte> command) {
   {
     const std::lock_guard<std::mutex> lock(mutex_);
     RAFTKV_RETURN_IF_ERROR(node_->Propose(command));
-    RAFTKV_RETURN_IF_ERROR(DrainAndPersist(&drained));
   }
+  RAFTKV_RETURN_IF_ERROR(FlushProposals(&drained));
   Finish(std::move(drained));
   return Status::Ok();
 }
@@ -556,12 +595,12 @@ Result<statemachine::ApplyResult> RaftDriver::ProposeAndWait(std::span<const std
       waiter.term = term;
       write_waiters_[index] = std::move(waiter);
     }
-    const Status s = DrainAndPersist(&drained);
-    if (!s.IsOk()) {
-      const std::lock_guard<std::mutex> waiters_lock(waiters_mutex_);
-      write_waiters_.erase(index);
-      return s;
-    }
+  }
+  const Status flushed = FlushProposals(&drained);
+  if (!flushed.IsOk()) {
+    const std::lock_guard<std::mutex> waiters_lock(waiters_mutex_);
+    write_waiters_.erase(index);
+    return flushed;
   }
   Finish(std::move(drained));
 
@@ -595,7 +634,8 @@ Status RaftDriver::AwaitReadPoint(std::chrono::steady_clock::time_point deadline
 
   DrainedReady drained;
   {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    WaitNotPersisting(lock);
     Status s = node_->ReadIndex(context);
     if (!s.IsOk()) {
       forget();
@@ -634,7 +674,8 @@ Status RaftDriver::AwaitReadPoint(std::chrono::steady_clock::time_point deadline
 }
 
 Result<std::optional<std::string>> RaftDriver::LinearizableGet(
-    std::string_view key, std::chrono::milliseconds timeout, std::optional<proto::LockRecord>* lock) {
+    std::string_view key, std::chrono::milliseconds timeout,
+    std::optional<proto::LockRecord>* lock) {
   RAFTKV_RETURN_IF_ERROR(AwaitReadPoint(std::chrono::steady_clock::now() + timeout));
   // Ownership is judged AFTER the read point: that is when this node's view of
   // its range is guaranteed current, so a handover that completed before the
@@ -687,7 +728,8 @@ std::string RaftDriver::AddressOf(uint64_t node_id) const {
 Status RaftDriver::HandleRequestVote(const proto::Message& request, proto::Message* response) {
   DrainedReady drained;
   {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    WaitNotPersisting(lock);
     node_->Step(request);
     RAFTKV_RETURN_IF_ERROR(DrainAndPersist(&drained));
   }
@@ -719,7 +761,8 @@ Status RaftDriver::HandleInbound(const proto::Message& request, proto::Message* 
                                  const char* what) {
   DrainedReady drained;
   {
-    const std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    WaitNotPersisting(lock);
     node_->Step(request);
     RAFTKV_RETURN_IF_ERROR(DrainAndPersist(&drained));
   }

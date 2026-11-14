@@ -66,15 +66,16 @@ class WatchingStateMachine final : public statemachine::StateMachine {
     const std::lock_guard<std::mutex> lock(mutex_);
     return last_index_;
   }
-  lsm::Status Scan(std::string_view, std::string_view, size_t,
-                   const std::function<lsm::Status(std::string_view, std::string_view)>&)
-      const override {
+  lsm::Status Scan(
+      std::string_view, std::string_view, size_t,
+      const std::function<lsm::Status(std::string_view, std::string_view)>&) const override {
     return lsm::Status::Ok();
   }
   statemachine::RangeVerdict CheckRange(std::string_view, std::string_view, bool) const override {
     return statemachine::RangeVerdict::kOk;
   }
-  std::optional<proto::LockRecord> FindBlockingLock(std::string_view, std::string_view) const override {
+  std::optional<proto::LockRecord> FindBlockingLock(std::string_view,
+                                                    std::string_view) const override {
     return std::nullopt;
   }
   lsm::Result<std::optional<std::string>> TxnDecision(std::string_view) const override {
@@ -162,10 +163,10 @@ class RaftDriverTest : public ::testing::Test {
 // machine, which treats any index at or below its last as a duplicate, silently
 // drops the earlier entry.
 TEST_F(RaftDriverTest, ApplyIsSerialisedAndOrderedUnderConcurrentProposals) {
-  // The proposer holds the driver's lock across an fsync, so one thread's apply
-  // can only overlap the next thread's drain if Apply() takes LONGER than that
-  // fsync. A cost below it makes this test pass even with the ordering removed
-  // (checked by mutation), so the cost here is deliberately large.
+  // One thread's apply can only overlap the next thread's drain if Apply()
+  // takes LONGER than the log fsync. A cost below it makes this test pass even
+  // with the ordering removed (checked by mutation), so the cost here is
+  // deliberately large.
   auto sm = std::make_shared<WatchingStateMachine>(std::chrono::milliseconds(30));
   StartSingleNode(sm);
 
@@ -197,6 +198,47 @@ TEST_F(RaftDriverTest, ApplyIsSerialisedAndOrderedUnderConcurrentProposals) {
   EXPECT_EQ(sm->AppliedCount(), static_cast<uint64_t>(kThreads * kPerThread))
       << "every command must be applied exactly once";
   EXPECT_EQ(driver_->RedeliveredEntries(), 0U);
+}
+
+// Writers that arrive while a sync is running share the next one. Every write
+// must still be applied exactly once, and the log must be synced fewer times
+// than there are writes or the batching is not happening.
+TEST_F(RaftDriverTest, ConcurrentWritesShareLogSyncs) {
+  auto sm = std::make_shared<WatchingStateMachine>(std::chrono::microseconds(0));
+  StartSingleNode(sm);
+  const uint64_t syncs_before = driver_->LogSyncs();
+
+  constexpr int kThreads = 16;
+  constexpr int kPerThread = 10;
+  std::atomic<int> failures{0};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&, t] {
+      const std::string client = "g" + std::to_string(t);
+      for (int i = 0; i < kPerThread; ++i) {
+        const std::string cmd =
+            Put(client, static_cast<uint64_t>(i) + 1, client + "-" + std::to_string(i));
+        if (!driver_->ProposeAndWait(AsBytes(cmd), std::chrono::seconds(10)).IsOk()) {
+          ++failures;
+        }
+      }
+    });
+  }
+  for (auto& th : threads) {
+    th.join();
+  }
+
+  ASSERT_EQ(failures.load(), 0);
+  EXPECT_EQ(sm->AppliedCount(), static_cast<uint64_t>(kThreads * kPerThread));
+  EXPECT_FALSE(sm->OutOfOrder());
+  EXPECT_EQ(driver_->RedeliveredEntries(), 0U);
+  const uint64_t syncs = driver_->LogSyncs() - syncs_before;
+  // Without batching this is exactly one sync per write; closed-loop writers
+  // drift out of step, so a fixed ratio would be flaky and 15% fewer is the
+  // floor.
+  EXPECT_LT(syncs, static_cast<uint64_t>(kThreads * kPerThread) * 85 / 100)
+      << syncs << " syncs for " << kThreads * kPerThread << " writes";
 }
 
 // Each committed entry is delivered once. The failure this guards against is

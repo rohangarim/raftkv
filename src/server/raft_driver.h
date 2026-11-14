@@ -116,9 +116,9 @@ class RaftDriver {
   // When `lock` is given and an in-flight transaction holds the key, the read
   // returns OK with no value and reports the lock instead; without it, that is
   // a Locked error. Either way the caller must settle the lock and retry.
-  Result<std::optional<std::string>> LinearizableGet(std::string_view key,
-                                                     std::chrono::milliseconds timeout,
-                                                     std::optional<proto::LockRecord>* lock = nullptr);
+  Result<std::optional<std::string>> LinearizableGet(
+      std::string_view key, std::chrono::milliseconds timeout,
+      std::optional<proto::LockRecord>* lock = nullptr);
 
   // "C", "A", or nullopt (no decision recorded here), read linearizably.
   Result<std::optional<std::string>> LinearizableTxnDecision(std::string_view txid,
@@ -146,6 +146,9 @@ class RaftDriver {
   // machine's index-based dedup would silently absorb while every commit costs
   // O(log length). Exposed so tests can assert it stays zero.
   uint64_t RedeliveredEntries() const;
+  // How many times the log has been fsynced; with group commit this grows
+  // slower than the number of writes.
+  uint64_t LogSyncs() const;
 
   // Outbound messages dropped because a peer was at its in-flight limit.
   uint64_t DroppedOutbound() const;
@@ -193,6 +196,17 @@ class RaftDriver {
   };
   Status DrainAndPersist(DrainedReady* out);
 
+  // Group commit. Writers append to the in-memory log under mutex_ (cheap),
+  // then call this. The first one in takes the pending Ready, releases mutex_
+  // for the fsync, and everything proposed meanwhile rides the next sync.
+  // Only appends can interleave with an unlocked persist: every other path
+  // that drains or mutates the node waits on persisting_ first, because a
+  // Step could truncate the very entries being written.
+  Status FlushProposals(DrainedReady* out);
+  Status PersistReady(const raft::Ready& ready);
+  void CompleteReady(raft::Ready& ready, DrainedReady* out);
+  void WaitNotPersisting(std::unique_lock<std::mutex>& lock);
+
   void TickLoop();
   void DispatchOutbound(std::vector<proto::Message> outbound);
   void SendOne(const proto::Message& message);
@@ -200,8 +214,7 @@ class RaftDriver {
   // released: apply committed entries in order, resolve finished reads, send
   // messages. Every call site goes through here so none can forget a step.
   void Finish(DrainedReady drained);
-  Status HandleInbound(const proto::Message& request, proto::Message* response,
-                       const char* what);
+  Status HandleInbound(const proto::Message& request, proto::Message* response, const char* what);
   void ApplyPending();
   void MaybeTakeSnapshot();
   void ApplyBatch(const std::vector<proto::Entry>& entries);
@@ -218,6 +231,9 @@ class RaftDriver {
   std::shared_ptr<statemachine::StateMachine> state_machine_;
 
   mutable std::mutex mutex_;
+  bool persisting_ = false;  // guarded by mutex_
+  std::atomic<uint64_t> log_syncs_{0};
+  std::condition_variable persist_cv_;
   std::unique_ptr<raft::RaftNode> node_;
   std::unique_ptr<storage::HardStateStore> hard_state_;
   std::unique_ptr<storage::RaftLogStore> log_;
