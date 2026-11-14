@@ -1,0 +1,12 @@
+# raftkv sanitizer status after the commit-index change and the benchmark tool
+# recorded: 2026-11-14T03:24:02Z
+# git: f97452b
+# command: ./scripts/ci.sh asan ubsan tsan
+
+== preset: asan
+100% tests passed out of 295
+== preset: ubsan
+100% tests passed out of 295
+== preset: tsan
+100% tests passed out of 295
+# done
